@@ -2,24 +2,32 @@
 """
 EDC16 M9R Trafic II - KWP2000 Diagnostic Server
 Reads Trame A0 (RPM/speed), A1 (fuel pressure), A5 (fuelling), A6 (rail pressure/MPROP)
-Serves live data as JSON via HTTP for the dashboard HTML frontend.
+Serves live data as JSON via HTTP for the dashboard HTML frontend, and logs
+every trip (ignition-on period) to its own CSV file under --log-dir.
 
-Usage:
-  pip install pyserial
-  python edc16_server.py --port COM3       # Windows
-  python edc16_server.py --port /dev/ttyUSB0  # Linux
+Ignition is assumed OFF once the K-line stops answering for a few consecutive
+poll cycles (IGNITION_OFF_CYCLES) — at that point the current trip log is
+closed, and a new one is opened automatically next time data starts flowing.
+
+Usage (with uv):
+  uv run edc16_server.py --port COM3          # Windows
+  uv run edc16_server.py --port /dev/ttyUSB0  # Linux
+  uv run edc16_server.py --mock               # no hardware needed
 
 Then open edc16_dashboard.html in your browser.
 """
 
 import argparse
+import csv
 import json
 import logging
 import serial
 import struct
 import time
 import threading
+from datetime import datetime
 from http.server import HTTPServer, BaseHTTPRequestHandler
+from pathlib import Path
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
 log = logging.getLogger("edc16")
@@ -79,6 +87,14 @@ TRAMES = {
     },
 }
 
+# Flat, stable list of every param name across all trames — used as the CSV header
+# so column order never changes between trips even if a poll misses some trames.
+ALL_PARAMS = [p for trame in TRAMES.values() for p in trame["params"]]
+
+# How many consecutive fully-empty poll cycles (all trames unanswered) before we
+# decide the K-line has gone quiet because the ignition was switched off.
+IGNITION_OFF_CYCLES = 5
+
 # Human-readable display names and grouping for the UI
 PARAM_GROUPS = {
     "Rail pressure": ["Rail pressure actual", "Rail pressure setpoint"],
@@ -99,6 +115,52 @@ def decode_value(data: bytes, first_byte_1idx: int, n_bits: int, signed: bool, s
     else:
         raw = 0
     return raw * step
+
+
+class TripLogger:
+    """Writes one CSV file per trip (ignition-on period) into log_dir.
+
+    A new file is opened the moment data starts flowing again after a gap,
+    and closed as soon as the ignition-off condition is detected, so each
+    file corresponds to one drive rather than one continuous never-ending log.
+    """
+
+    def __init__(self, log_dir: str):
+        self.log_dir = Path(log_dir)
+        self.log_dir.mkdir(parents=True, exist_ok=True)
+        self._file = None
+        self._writer = None
+        self.path = None
+
+    @property
+    def active(self) -> bool:
+        return self._file is not None
+
+    def start_trip(self):
+        ts = datetime.now().strftime("%Y%m%d_%H%M%S")
+        self.path = self.log_dir / f"trip_{ts}.csv"
+        self._file = open(self.path, "w", newline="", encoding="utf-8")
+        self._writer = csv.writer(self._file)
+        self._writer.writerow(["timestamp"] + ALL_PARAMS)
+        log.info(f"Ignition ON — logging trip to {self.path}")
+
+    def log_row(self, data: dict):
+        if not self._writer:
+            return
+        row = [datetime.now().isoformat(timespec="milliseconds")]
+        for name in ALL_PARAMS:
+            entry = data.get(name)
+            row.append(entry["value"] if entry else "")
+        self._writer.writerow(row)
+        self._file.flush()
+
+    def end_trip(self):
+        if self._file:
+            log.info(f"Ignition OFF — closed trip log {self.path}")
+            self._file.close()
+        self._file = None
+        self._writer = None
+        self.path = None
 
 
 class ELM327:
@@ -173,20 +235,23 @@ class ELM327:
 class DiagSession:
     """Polls all trames and maintains a current-values dict."""
 
-    def __init__(self, elm: ELM327):
+    def __init__(self, elm: ELM327, logger: "TripLogger | None" = None):
         self.elm = elm
         self.data: dict = {}
         self.errors: list = []
         self.running = False
         self._thread = None
         self.last_update = 0.0
+        self.logger = logger
+        self.ignition = "unknown"  # "on" | "off" | "unknown"
+        self._consecutive_empty = 0
 
-    def _poll_trame(self, name: str, trame: dict):
+    def _poll_trame(self, name: str, trame: dict) -> bool:
         cmd_hex = trame["cmd"].hex().upper()
         resp = self.elm.send_kwp(cmd_hex)
         if resp is None or len(resp) < trame["min_bytes"]:
             log.warning(f"Trame {name}: short/no response ({len(resp) if resp else 0} bytes)")
-            return
+            return False
         for param, (fb, nb, signed, step, unit) in trame["params"].items():
             try:
                 val = decode_value(resp, fb, nb, signed, step)
@@ -205,11 +270,33 @@ class DiagSession:
                 self.data[param] = {"value": round(val, 3), "unit": unit}
             except Exception as e:
                 log.debug(f"Decode error {param}: {e}")
+        return True
 
     def poll_once(self):
+        any_success = False
         for name, trame in TRAMES.items():
-            self._poll_trame(name, trame)
+            if self._poll_trame(name, trame):
+                any_success = True
         self.last_update = time.time()
+        self._mark_cycle(any_success)
+
+    def _mark_cycle(self, any_success: bool):
+        if any_success:
+            self._consecutive_empty = 0
+            if self.ignition != "on":
+                self.ignition = "on"
+                if self.logger:
+                    self.logger.start_trip()
+            if self.logger and self.logger.active:
+                self.logger.log_row(self.data)
+        else:
+            self._consecutive_empty += 1
+            if self._consecutive_empty >= IGNITION_OFF_CYCLES and self.ignition != "off":
+                self.ignition = "off"
+                log.warning("No response on any trame — assuming ignition OFF.")
+                self.data = {}
+                if self.logger:
+                    self.logger.end_trip()
 
     def _loop(self):
         while self.running:
@@ -217,6 +304,8 @@ class DiagSession:
                 self.poll_once()
             except Exception as e:
                 log.error(f"Poll error: {e}")
+                self.last_update = time.time()
+                self._mark_cycle(False)
             time.sleep(0.3)
 
     def start(self):
@@ -250,6 +339,9 @@ class Handler(BaseHTTPRequestHandler):
         payload = {
             "ts": time.time(),
             "data": session.data if session else {},
+            "ignition": session.ignition if session else "unknown",
+            "logging": bool(session.logger and session.logger.active) if session else False,
+            "log_file": str(session.logger.path) if session and session.logger and session.logger.active else None,
         }
         body = json.dumps(payload).encode()
         self.send_response(200)
@@ -276,18 +368,22 @@ def main():
     parser.add_argument("--baud", type=int, default=38400, help="ELM327 serial baud rate")
     parser.add_argument("--http-port", type=int, default=8765, help="HTTP server port")
     parser.add_argument("--mock", action="store_true", help="Run with mock data (no hardware needed)")
+    parser.add_argument("--log-dir", default="logs", help="Directory to write per-trip CSV logs into")
+    parser.add_argument("--no-log", action="store_true", help="Disable CSV trip logging")
     args = parser.parse_args()
+
+    trip_logger = None if args.no_log else TripLogger(args.log_dir)
 
     if args.mock:
         log.info("Running in MOCK mode - no hardware required")
-        session = _MockSession()
+        session = _MockSession(trip_logger)
         session.start()
     else:
         log.info(f"Connecting to ELM327 on {args.port} at {args.baud} baud...")
         elm = ELM327(args.port, args.baud)
         elm.init_elm()
         elm.kwp_init()
-        session = DiagSession(elm)
+        session = DiagSession(elm, trip_logger)
         session.start()
         log.info("Polling started.")
 
@@ -306,25 +402,52 @@ def main():
 
 
 class _MockSession:
-    """Simulates a degraded pump scenario for UI testing without hardware."""
-    def __init__(self):
+    """Simulates a degraded pump scenario for UI testing without hardware.
+
+    Also cycles ignition on/off every couple of minutes so the trip-logging
+    and ignition-off UI states can be exercised without real hardware.
+    """
+    def __init__(self, logger: "TripLogger | None" = None):
         self.data = {}
         self.last_update = 0.0
         self.running = False
+        self.logger = logger
+        self.ignition = "on"
         self._t = 0.0
 
     def start(self):
         self.running = True
+        if self.logger:
+            self.logger.start_trip()
         t = threading.Thread(target=self._loop, daemon=True)
         t.start()
 
     def stop(self):
         self.running = False
+        if self.logger:
+            self.logger.end_trip()
 
     def _loop(self):
         import math
         while self.running:
             self._t += 0.3
+
+            # Simulate the engine being switched off for ~10s every ~70s of mock time.
+            cycle = self._t % 70
+            if cycle > 60:
+                if self.ignition != "off":
+                    self.ignition = "off"
+                    self.data = {}
+                    if self.logger:
+                        self.logger.end_trip()
+                self.last_update = time.time()
+                time.sleep(0.3)
+                continue
+            elif self.ignition != "on":
+                self.ignition = "on"
+                if self.logger:
+                    self.logger.start_trip()
+
             rpm = 800 + 2200 * abs(math.sin(self._t / 10))
             # Simulate pressure falling short above 2500 rpm
             pressure_limit = 1600 if rpm < 2500 else 1100 + 100 * math.sin(self._t)
@@ -358,6 +481,8 @@ class _MockSession:
                 "Accel pedal %":            {"value": round(50 * abs(math.sin(self._t / 8)), 1), "unit": "%"},
             }
             self.last_update = time.time()
+            if self.logger:
+                self.logger.log_row(self.data)
             time.sleep(0.3)
 
 

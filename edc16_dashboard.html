@@ -230,6 +230,7 @@
   <div id="status-dot"></div>
   <h1><span>EDC16</span> / VCD-X70 / M9R 2.0 dCi — Fuel pressure diagnostic</h1>
   <span id="status-label">disconnected</span>
+  <span id="log-label" style="color:var(--text3);font-size:11px;"></span>
   <div id="server-url">
     <input id="srv" value="http://localhost:8765" />
     <button onclick="reconnect()">Connect</button>
@@ -504,7 +505,24 @@ function checkWarnings(data) {
   banner.classList.toggle('show', !!saturated);
 }
 
+function setLogLabel(resp) {
+  const el = document.getElementById('log-label');
+  if (resp.logging && resp.log_file) {
+    el.textContent = 'logging → ' + resp.log_file.split(/[\\/]/).pop();
+  } else {
+    el.textContent = '';
+  }
+}
+
 function processData(resp) {
+  const ignition = resp.ignition || 'unknown';
+  setLogLabel(resp);
+  if (ignition === 'off') {
+    setStatus('warn', 'ignition off — waiting for engine start');
+    document.getElementById('warn-banner').classList.remove('show');
+    return; // freeze last-known values/charts rather than showing a connection error
+  }
+
   const data = resp.data;
   const now = ts();
 

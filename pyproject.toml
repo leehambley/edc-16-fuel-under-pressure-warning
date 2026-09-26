@@ -1,0 +1,11 @@
+[project]
+name = "edc16-fuel-under-pressure-warning"
+version = "0.1.0"
+description = "EDC16 M9R KWP2000 diagnostic server for fuel/rail pressure monitoring"
+requires-python = ">=3.10"
+dependencies = [
+    "pyserial>=3.5",
+]
+
+[tool.uv]
+package = false
