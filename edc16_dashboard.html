@@ -1,0 +1,582 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>EDC16 M9R — Fuel Pressure Diagnostic</title>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/Chart.js/4.4.1/chart.umd.js"></script>
+<style>
+  :root {
+    --bg: #0f0f0f;
+    --bg2: #181818;
+    --bg3: #222;
+    --border: rgba(255,255,255,0.08);
+    --border2: rgba(255,255,255,0.14);
+    --text: #e8e6e0;
+    --text2: #888;
+    --text3: #555;
+    --green: #5dca9a;
+    --amber: #ef9f27;
+    --red: #e24b4a;
+    --blue: #378add;
+    --purple: #7f77dd;
+    --teal: #1d9e75;
+    --font: 'JetBrains Mono', 'Consolas', 'Courier New', monospace;
+  }
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  body {
+    background: var(--bg);
+    color: var(--text);
+    font-family: var(--font);
+    font-size: 13px;
+    min-height: 100vh;
+    padding: 0;
+  }
+  #header {
+    border-bottom: 1px solid var(--border);
+    padding: 12px 20px;
+    display: flex;
+    align-items: center;
+    gap: 20px;
+    position: sticky;
+    top: 0;
+    background: var(--bg);
+    z-index: 100;
+  }
+  #header h1 {
+    font-size: 14px;
+    font-weight: 400;
+    letter-spacing: 0.08em;
+    color: var(--text2);
+    text-transform: uppercase;
+  }
+  #header h1 span { color: var(--text); }
+  #status-dot {
+    width: 8px; height: 8px;
+    border-radius: 50%;
+    background: var(--text3);
+    flex-shrink: 0;
+  }
+  #status-dot.ok { background: var(--green); box-shadow: 0 0 6px var(--green); }
+  #status-dot.warn { background: var(--amber); box-shadow: 0 0 6px var(--amber); }
+  #status-dot.err { background: var(--red); }
+  #status-label { color: var(--text2); font-size: 11px; }
+  #server-url {
+    margin-left: auto;
+    display: flex;
+    align-items: center;
+    gap: 8px;
+  }
+  #server-url input {
+    background: var(--bg3);
+    border: 1px solid var(--border2);
+    border-radius: 4px;
+    color: var(--text);
+    font-family: var(--font);
+    font-size: 12px;
+    padding: 4px 8px;
+    width: 200px;
+  }
+  #server-url button {
+    background: var(--bg3);
+    border: 1px solid var(--border2);
+    border-radius: 4px;
+    color: var(--text2);
+    font-family: var(--font);
+    font-size: 11px;
+    padding: 4px 10px;
+    cursor: pointer;
+    text-transform: uppercase;
+    letter-spacing: 0.06em;
+  }
+  #server-url button:hover { border-color: var(--blue); color: var(--blue); }
+
+  #layout {
+    display: grid;
+    grid-template-columns: 320px 1fr;
+    gap: 0;
+    height: calc(100vh - 45px);
+    overflow: hidden;
+  }
+  #sidebar {
+    border-right: 1px solid var(--border);
+    overflow-y: auto;
+    padding: 16px 0;
+  }
+  #main {
+    overflow-y: auto;
+    padding: 16px 20px;
+    display: flex;
+    flex-direction: column;
+    gap: 16px;
+  }
+
+  .section-label {
+    font-size: 10px;
+    letter-spacing: 0.12em;
+    text-transform: uppercase;
+    color: var(--text3);
+    padding: 8px 16px 4px;
+  }
+  .param-row {
+    display: flex;
+    align-items: center;
+    padding: 6px 16px;
+    gap: 10px;
+    border-left: 2px solid transparent;
+    cursor: pointer;
+    transition: background 0.1s;
+  }
+  .param-row:hover { background: var(--bg3); }
+  .param-row.active { border-left-color: var(--blue); background: rgba(55,138,221,0.07); }
+  .param-name { flex: 1; color: var(--text2); font-size: 12px; }
+  .param-val {
+    font-size: 15px;
+    font-weight: 400;
+    min-width: 72px;
+    text-align: right;
+    color: var(--text);
+    font-variant-numeric: tabular-nums;
+  }
+  .param-unit { font-size: 10px; color: var(--text3); min-width: 30px; text-align: right; }
+  .param-val.warn { color: var(--amber); }
+  .param-val.crit { color: var(--red); }
+  .param-val.good { color: var(--green); }
+
+  .chart-card {
+    background: var(--bg2);
+    border: 1px solid var(--border);
+    border-radius: 6px;
+    padding: 14px 16px 12px;
+  }
+  .chart-title {
+    font-size: 10px;
+    letter-spacing: 0.1em;
+    text-transform: uppercase;
+    color: var(--text3);
+    margin-bottom: 12px;
+    display: flex;
+    align-items: center;
+    gap: 10px;
+  }
+  .chart-title .legend { display: flex; gap: 14px; margin-left: auto; }
+  .legend-item { display: flex; align-items: center; gap: 5px; font-size: 11px; color: var(--text2); }
+  .legend-swatch { width: 20px; height: 2px; border-radius: 1px; }
+  .legend-swatch.dashed {
+    background: none;
+    border-top: 2px dashed;
+    height: 0;
+    margin-top: 1px;
+  }
+
+  #gauge-row {
+    display: grid;
+    grid-template-columns: repeat(4, 1fr);
+    gap: 10px;
+  }
+  .gauge-card {
+    background: var(--bg2);
+    border: 1px solid var(--border);
+    border-radius: 6px;
+    padding: 12px 14px;
+  }
+  .gauge-label {
+    font-size: 10px;
+    color: var(--text3);
+    text-transform: uppercase;
+    letter-spacing: 0.08em;
+    margin-bottom: 6px;
+  }
+  .gauge-value {
+    font-size: 26px;
+    font-weight: 400;
+    font-variant-numeric: tabular-nums;
+    color: var(--text);
+    line-height: 1;
+    margin-bottom: 2px;
+  }
+  .gauge-unit { font-size: 11px; color: var(--text3); }
+  .gauge-bar-bg {
+    height: 3px;
+    background: var(--bg3);
+    border-radius: 2px;
+    margin-top: 10px;
+    overflow: hidden;
+  }
+  .gauge-bar-fill {
+    height: 100%;
+    border-radius: 2px;
+    background: var(--green);
+    transition: width 0.3s, background 0.3s;
+  }
+
+  #warn-banner {
+    display: none;
+    background: rgba(226,75,74,0.12);
+    border: 1px solid rgba(226,75,74,0.4);
+    border-radius: 6px;
+    padding: 10px 14px;
+    font-size: 12px;
+    color: var(--red);
+    letter-spacing: 0.04em;
+  }
+  #warn-banner.show { display: block; }
+
+  .divider { border: none; border-top: 1px solid var(--border); margin: 4px 0; }
+</style>
+</head>
+<body>
+<div id="header">
+  <div id="status-dot"></div>
+  <h1><span>EDC16</span> / VCD-X70 / M9R 2.0 dCi — Fuel pressure diagnostic</h1>
+  <span id="status-label">disconnected</span>
+  <div id="server-url">
+    <input id="srv" value="http://localhost:8765" />
+    <button onclick="reconnect()">Connect</button>
+  </div>
+</div>
+
+<div id="layout">
+  <div id="sidebar">
+    <div class="section-label">Rail pressure</div>
+    <div class="param-row" data-key="Rail pressure actual" onclick="toggleChart(this)">
+      <span class="param-name">Actual</span>
+      <span class="param-val" id="v-Rail pressure actual">—</span>
+      <span class="param-unit" id="u-Rail pressure actual">bar</span>
+    </div>
+    <div class="param-row active" data-key="Rail pressure setpoint" onclick="toggleChart(this)">
+      <span class="param-name">Setpoint</span>
+      <span class="param-val" id="v-Rail pressure setpoint">—</span>
+      <span class="param-unit" id="u-Rail pressure setpoint">bar</span>
+    </div>
+
+    <div class="section-label">MPROP regulator</div>
+    <div class="param-row" data-key="MPROP duty cycle" onclick="toggleChart(this)">
+      <span class="param-name">Duty cycle</span>
+      <span class="param-val" id="v-MPROP duty cycle">—</span>
+      <span class="param-unit" id="u-MPROP duty cycle">%</span>
+    </div>
+    <div class="param-row" data-key="MPROP current actual" onclick="toggleChart(this)">
+      <span class="param-name">Current actual</span>
+      <span class="param-val" id="v-MPROP current actual">—</span>
+      <span class="param-unit" id="u-MPROP current actual">mA</span>
+    </div>
+    <div class="param-row" data-key="MPROP current setpoint" onclick="toggleChart(this)">
+      <span class="param-name">Current setpoint</span>
+      <span class="param-val" id="v-MPROP current setpoint">—</span>
+      <span class="param-unit" id="u-MPROP current setpoint">mA</span>
+    </div>
+
+    <div class="section-label">Fuelling</div>
+    <div class="param-row" data-key="Demanded qty" onclick="toggleChart(this)">
+      <span class="param-name">Demanded</span>
+      <span class="param-val" id="v-Demanded qty">—</span>
+      <span class="param-unit" id="u-Demanded qty">mg/c</span>
+    </div>
+    <div class="param-row" data-key="Actual qty" onclick="toggleChart(this)">
+      <span class="param-name">Actual</span>
+      <span class="param-val" id="v-Actual qty">—</span>
+      <span class="param-unit" id="u-Actual qty">mg/c</span>
+    </div>
+    <div class="param-row" data-key="Max qty limit" onclick="toggleChart(this)">
+      <span class="param-name">Max limit</span>
+      <span class="param-val" id="v-Max qty limit">—</span>
+      <span class="param-unit" id="u-Max qty limit">mg/c</span>
+    </div>
+
+    <div class="section-label">Per-cylinder qty</div>
+    <div class="param-row" data-key="Cyl1 qty" onclick="toggleChart(this)">
+      <span class="param-name">Cyl 1</span>
+      <span class="param-val" id="v-Cyl1 qty">—</span>
+      <span class="param-unit" id="u-Cyl1 qty">mg/c</span>
+    </div>
+    <div class="param-row" data-key="Cyl2 qty" onclick="toggleChart(this)">
+      <span class="param-name">Cyl 2</span>
+      <span class="param-val" id="v-Cyl2 qty">—</span>
+      <span class="param-unit" id="u-Cyl2 qty">mg/c</span>
+    </div>
+    <div class="param-row" data-key="Cyl3 qty" onclick="toggleChart(this)">
+      <span class="param-name">Cyl 3</span>
+      <span class="param-val" id="v-Cyl3 qty">—</span>
+      <span class="param-unit" id="u-Cyl3 qty">mg/c</span>
+    </div>
+    <div class="param-row" data-key="Cyl4 qty" onclick="toggleChart(this)">
+      <span class="param-name">Cyl 4</span>
+      <span class="param-val" id="v-Cyl4 qty">—</span>
+      <span class="param-unit" id="u-Cyl4 qty">mg/c</span>
+    </div>
+
+    <hr class="divider">
+    <div class="section-label">Engine</div>
+    <div class="param-row" data-key="RPM" onclick="toggleChart(this)">
+      <span class="param-name">RPM</span>
+      <span class="param-val" id="v-RPM">—</span>
+      <span class="param-unit" id="u-RPM">rpm</span>
+    </div>
+    <div class="param-row" data-key="Engine torque actual" onclick="toggleChart(this)">
+      <span class="param-name">Torque</span>
+      <span class="param-val" id="v-Engine torque actual">—</span>
+      <span class="param-unit" id="u-Engine torque actual">Nm</span>
+    </div>
+    <div class="param-row" data-key="Accel pedal %" onclick="toggleChart(this)">
+      <span class="param-name">Accel pedal</span>
+      <span class="param-val" id="v-Accel pedal %">—</span>
+      <span class="param-unit" id="u-Accel pedal %">%</span>
+    </div>
+
+    <hr class="divider">
+    <div class="section-label">Sensors</div>
+    <div class="param-row" data-key="Water temp" onclick="toggleChart(this)">
+      <span class="param-name">Water temp</span>
+      <span class="param-val" id="v-Water temp">—</span>
+      <span class="param-unit" id="u-Water temp">°C</span>
+    </div>
+    <div class="param-row" data-key="Fuel temp" onclick="toggleChart(this)">
+      <span class="param-name">Fuel temp</span>
+      <span class="param-val" id="v-Fuel temp">—</span>
+      <span class="param-unit" id="u-Fuel temp">°C</span>
+    </div>
+    <div class="param-row" data-key="Batt voltage" onclick="toggleChart(this)">
+      <span class="param-name">Battery</span>
+      <span class="param-val" id="v-Batt voltage">—</span>
+      <span class="param-unit" id="u-Batt voltage">V</span>
+    </div>
+    <div class="param-row" data-key="Fuel pressure (LP)" onclick="toggleChart(this)">
+      <span class="param-name">LP fuel press</span>
+      <span class="param-val" id="v-Fuel pressure (LP)">—</span>
+      <span class="param-unit" id="u-Fuel pressure (LP)">bar</span>
+    </div>
+    <div class="param-row" data-key="Rail sensor voltage" onclick="toggleChart(this)">
+      <span class="param-name">Rail sensor V</span>
+      <span class="param-val" id="v-Rail sensor voltage">—</span>
+      <span class="param-unit" id="u-Rail sensor voltage">V</span>
+    </div>
+  </div>
+
+  <div id="main">
+    <div id="warn-banner" role="alert">⚠ PUMP SATURATION — MPROP duty at max, rail pressure below setpoint. HP pump cannot meet demand.</div>
+
+    <div id="gauge-row">
+      <div class="gauge-card">
+        <div class="gauge-label">Rail actual</div>
+        <div class="gauge-value" id="g-rail-actual">—</div>
+        <div class="gauge-unit">bar</div>
+        <div class="gauge-bar-bg"><div class="gauge-bar-fill" id="gb-rail-actual" style="width:0%"></div></div>
+      </div>
+      <div class="gauge-card">
+        <div class="gauge-label">Rail setpoint</div>
+        <div class="gauge-value" id="g-rail-set">—</div>
+        <div class="gauge-unit">bar</div>
+        <div class="gauge-bar-bg"><div class="gauge-bar-fill" id="gb-rail-set" style="width:0%;background:var(--text3)"></div></div>
+      </div>
+      <div class="gauge-card">
+        <div class="gauge-label">MPROP duty</div>
+        <div class="gauge-value" id="g-mprop">—</div>
+        <div class="gauge-unit">%</div>
+        <div class="gauge-bar-bg"><div class="gauge-bar-fill" id="gb-mprop" style="width:0%"></div></div>
+      </div>
+      <div class="gauge-card">
+        <div class="gauge-label">RPM</div>
+        <div class="gauge-value" id="g-rpm">—</div>
+        <div class="gauge-unit">rpm</div>
+        <div class="gauge-bar-bg"><div class="gauge-bar-fill" id="gb-rpm" style="width:0%;background:var(--purple)"></div></div>
+      </div>
+    </div>
+
+    <div class="chart-card">
+      <div class="chart-title">
+        Rail pressure — actual vs setpoint
+        <div class="legend">
+          <div class="legend-item"><div class="legend-swatch" style="background:var(--blue)"></div>Actual</div>
+          <div class="legend-item"><div class="legend-swatch dashed" style="border-color:var(--text3)"></div>Setpoint</div>
+        </div>
+      </div>
+      <div style="position:relative;height:180px"><canvas id="chartRail" role="img" aria-label="Rail pressure actual vs setpoint over time">Live rail pressure data</canvas></div>
+    </div>
+
+    <div class="chart-card">
+      <div class="chart-title">
+        MPROP duty cycle &amp; RPM
+        <div class="legend">
+          <div class="legend-item"><div class="legend-swatch" style="background:var(--amber)"></div>MPROP duty %</div>
+          <div class="legend-item"><div class="legend-swatch" style="background:var(--purple)"></div>RPM ÷ 60</div>
+        </div>
+      </div>
+      <div style="position:relative;height:140px"><canvas id="chartMprop" role="img" aria-label="MPROP duty cycle and RPM over time">Live MPROP data</canvas></div>
+    </div>
+
+    <div class="chart-card">
+      <div class="chart-title">
+        Selected parameter
+        <div class="legend" id="selected-legend">
+          <div class="legend-item"><div class="legend-swatch" style="background:var(--green)"></div><span id="selected-name">— click a row —</span></div>
+        </div>
+      </div>
+      <div style="position:relative;height:140px"><canvas id="chartSelected" role="img" aria-label="Selected parameter over time">Live selected parameter</canvas></div>
+    </div>
+
+  </div>
+</div>
+
+<script>
+const HISTORY = 120;
+const ts = () => new Date().toLocaleTimeString('en-GB', {hour12:false});
+
+let serverBase = 'http://localhost:8765';
+let polling = null;
+let selectedParam = null;
+
+const history = {};
+const timeLabels = Array(HISTORY).fill('');
+
+function makeChart(id, datasets, yLabel, yMax) {
+  const cfg = {
+    type: 'line',
+    data: { labels: timeLabels, datasets },
+    options: {
+      responsive: true, maintainAspectRatio: false, animation: false,
+      plugins: { legend: { display: false }, tooltip: { mode: 'index', intersect: false } },
+      scales: {
+        x: { display: false },
+        y: {
+          display: true, position: 'right',
+          max: yMax || undefined,
+          grid: { color: 'rgba(255,255,255,0.05)' },
+          ticks: { color: '#555', font: { family: 'JetBrains Mono, monospace', size: 10 } },
+          title: { display: !!yLabel, text: yLabel, color: '#444', font: { size: 10 } }
+        }
+      },
+      elements: { point: { radius: 0 }, line: { tension: 0.3, borderWidth: 1.5 } }
+    }
+  };
+  return new Chart(document.getElementById(id), cfg);
+}
+
+const chartRail = makeChart('chartRail', [
+  { label: 'Rail actual', data: Array(HISTORY).fill(null), borderColor: '#378add', fill: false },
+  { label: 'Rail setpoint', data: Array(HISTORY).fill(null), borderColor: '#444', borderDash: [4,3], fill: false },
+], 'bar', 1800);
+
+const chartMprop = makeChart('chartMprop', [
+  { label: 'MPROP duty', data: Array(HISTORY).fill(null), borderColor: '#ef9f27', fill: false },
+  { label: 'RPM/60', data: Array(HISTORY).fill(null), borderColor: '#7f77dd', fill: false },
+], '%', 110);
+
+const chartSelected = makeChart('chartSelected', [
+  { label: 'Selected', data: Array(HISTORY).fill(null), borderColor: '#5dca9a', fill: false },
+], '', null);
+
+function pushHistory(key, val) {
+  if (!history[key]) history[key] = Array(HISTORY).fill(null);
+  history[key].push(val);
+  if (history[key].length > HISTORY) history[key].shift();
+}
+
+function updateChart(chart, idx, arr) {
+  chart.data.datasets[idx].data = arr.slice();
+  chart.update('none');
+}
+
+function setStatus(state, msg) {
+  const dot = document.getElementById('status-dot');
+  dot.className = '';
+  dot.classList.add(state);
+  document.getElementById('status-label').textContent = msg;
+}
+
+function updateGauge(id, barId, val, max, thresholds) {
+  document.getElementById(id).textContent = val !== null ? val : '—';
+  const fill = document.getElementById(barId);
+  if (val === null) { fill.style.width = '0%'; return; }
+  const pct = Math.min(100, (val / max) * 100);
+  fill.style.width = pct + '%';
+  if (thresholds) {
+    fill.style.background = val >= thresholds.crit ? 'var(--red)' : val >= thresholds.warn ? 'var(--amber)' : 'var(--green)';
+  }
+}
+
+function checkWarnings(data) {
+  const banner = document.getElementById('warn-banner');
+  const mprop = data['MPROP duty cycle']?.value;
+  const actual = data['Rail pressure actual']?.value;
+  const setpt = data['Rail pressure setpoint']?.value;
+  const saturated = mprop > 90 && actual !== null && setpt !== null && (setpt - actual) > 50;
+  banner.classList.toggle('show', !!saturated);
+}
+
+function processData(resp) {
+  const data = resp.data;
+  const now = ts();
+
+  timeLabels.push(now);
+  if (timeLabels.length > HISTORY) timeLabels.shift();
+
+  for (const [key, obj] of Object.entries(data)) {
+    const el = document.getElementById('v-' + key);
+    if (el) {
+      const v = obj.value;
+      el.textContent = (typeof v === 'number') ? (v % 1 === 0 ? v : v.toFixed(2)) : v;
+    }
+    pushHistory(key, obj.value ?? null);
+  }
+
+  const railActual = data['Rail pressure actual']?.value ?? null;
+  const railSet = data['Rail pressure setpoint']?.value ?? null;
+  const mprop = data['MPROP duty cycle']?.value ?? null;
+  const rpm = data['RPM']?.value ?? null;
+
+  updateGauge('g-rail-actual', 'gb-rail-actual', railActual, 1800, {warn: 900, crit: 1400});
+  updateGauge('g-rail-set', 'gb-rail-set', railSet, 1800, null);
+  updateGauge('g-mprop', 'gb-mprop', mprop !== null ? mprop.toFixed(1) : null, 100, {warn: 80, crit: 92});
+  updateGauge('g-rpm', 'gb-rpm', rpm !== null ? Math.round(rpm) : null, 4500, null);
+
+  updateChart(chartRail, 0, history['Rail pressure actual'] || []);
+  updateChart(chartRail, 1, history['Rail pressure setpoint'] || []);
+  chartRail.data.labels = timeLabels.slice();
+  chartRail.update('none');
+
+  const rpmDiv = (history['RPM'] || []).map(v => v !== null ? v / 60 : null);
+  updateChart(chartMprop, 0, history['MPROP duty cycle'] || []);
+  updateChart(chartMprop, 1, rpmDiv);
+  chartMprop.data.labels = timeLabels.slice();
+  chartMprop.update('none');
+
+  if (selectedParam && history[selectedParam]) {
+    chartSelected.data.datasets[0].data = history[selectedParam].slice();
+    chartSelected.data.labels = timeLabels.slice();
+    chartSelected.update('none');
+  }
+
+  checkWarnings(data);
+  setStatus('ok', 'live — ' + now);
+}
+
+function poll() {
+  fetch(serverBase + '/data')
+    .then(r => r.json())
+    .then(processData)
+    .catch(() => setStatus('err', 'no connection'));
+}
+
+function reconnect() {
+  serverBase = document.getElementById('srv').value.replace(/\/+$/, '');
+  if (polling) clearInterval(polling);
+  setStatus('warn', 'connecting…');
+  poll();
+  polling = setInterval(poll, 400);
+}
+
+function toggleChart(row) {
+  document.querySelectorAll('.param-row').forEach(r => r.classList.remove('active'));
+  row.classList.add('active');
+  selectedParam = row.dataset.key;
+  document.getElementById('selected-name').textContent = selectedParam;
+  chartSelected.data.datasets[0].data = (history[selectedParam] || Array(HISTORY).fill(null)).slice();
+  chartSelected.data.labels = timeLabels.slice();
+  chartSelected.update('none');
+}
+
+reconnect();
+</script>
+</body>
+</html>
