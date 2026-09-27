@@ -21,6 +21,7 @@ import argparse
 import csv
 import json
 import logging
+import re
 import serial
 import struct
 import time
@@ -354,6 +355,8 @@ class DiagSession:
 # ─── HTTP server ──────────────────────────────────────────────────────────────
 
 session = None
+LOG_DIR = "logs"
+TRIP_FILENAME_RE = re.compile(r"^trip_\d{8}_\d{6}\.csv$")
 
 
 class Handler(BaseHTTPRequestHandler):
@@ -365,6 +368,10 @@ class Handler(BaseHTTPRequestHandler):
             self._serve_data()
         elif self.path == "/groups":
             self._serve_groups()
+        elif self.path == "/trips":
+            self._serve_trips()
+        elif self.path.startswith("/trips/"):
+            self._serve_trip_detail(self.path[len("/trips/"):])
         else:
             self.send_response(404)
             self.end_headers()
@@ -402,6 +409,59 @@ class Handler(BaseHTTPRequestHandler):
         self.end_headers()
         self.wfile.write(body)
 
+    def _serve_trips(self):
+        log_dir = Path(LOG_DIR)
+        trips = []
+        if log_dir.is_dir():
+            for f in sorted(log_dir.glob("trip_*.csv"), reverse=True):
+                if not TRIP_FILENAME_RE.match(f.name):
+                    continue
+                stat = f.stat()
+                trips.append({"filename": f.name, "size": stat.st_size, "mtime": stat.st_mtime})
+        body = json.dumps(trips).encode()
+        self.send_response(200)
+        self.send_header("Content-Type", "application/json")
+        self.send_header("Access-Control-Allow-Origin", "*")
+        self.send_header("Content-Length", str(len(body)))
+        self.end_headers()
+        self.wfile.write(body)
+
+    def _serve_trip_detail(self, filename: str):
+        if not TRIP_FILENAME_RE.match(filename):
+            self.send_response(400)
+            self.end_headers()
+            return
+        path = Path(LOG_DIR) / filename
+        if not path.is_file():
+            self.send_response(404)
+            self.end_headers()
+            return
+        with open(path, newline="", encoding="utf-8") as f:
+            reader = csv.reader(f)
+            header = next(reader, [])
+            rows = list(reader)
+        columns = header[1:]  # drop leading "timestamp" column
+        timestamps = []
+        series = {c: [] for c in columns}
+        for row in rows:
+            timestamps.append(row[0] if row else "")
+            for i, col in enumerate(columns, start=1):
+                raw = row[i] if i < len(row) else ""
+                if raw == "":
+                    series[col].append(None)
+                    continue
+                try:
+                    series[col].append(float(raw))
+                except ValueError:
+                    series[col].append(raw)  # e.g. hex trame dump or DTC list
+        body = json.dumps({"filename": filename, "timestamps": timestamps, "series": series}).encode()
+        self.send_response(200)
+        self.send_header("Content-Type", "application/json")
+        self.send_header("Access-Control-Allow-Origin", "*")
+        self.send_header("Content-Length", str(len(body)))
+        self.end_headers()
+        self.wfile.write(body)
+
     def _clear_dtcs(self):
         ok = False
         if session is not None:
@@ -419,7 +479,7 @@ class Handler(BaseHTTPRequestHandler):
 
 
 def main():
-    global session
+    global session, LOG_DIR
 
     parser = argparse.ArgumentParser(description="EDC16 M9R KWP2000 diagnostic server")
     parser.add_argument("--port", default="COM3", help="Serial port (e.g. COM3 or /dev/ttyUSB0)")
@@ -430,6 +490,7 @@ def main():
     parser.add_argument("--no-log", action="store_true", help="Disable CSV trip logging")
     args = parser.parse_args()
 
+    LOG_DIR = args.log_dir
     trip_logger = None if args.no_log else TripLogger(args.log_dir)
 
     if args.mock:

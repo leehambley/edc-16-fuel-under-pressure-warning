@@ -116,6 +116,16 @@
     letter-spacing: 0.06em;
   }
   #server-url button:hover { border-color: var(--blue); color: var(--blue); }
+  #session-select {
+    background: var(--bg3);
+    border: 1px solid var(--border2);
+    border-radius: 4px;
+    color: var(--text);
+    font-family: var(--font);
+    font-size: 11px;
+    padding: 4px 8px;
+    max-width: 220px;
+  }
 
   #layout {
     display: grid;
@@ -339,6 +349,9 @@
   <span id="status-label">disconnected</span>
   <span id="log-label" style="color:var(--text3);font-size:11px;"></span>
   <div id="server-url">
+    <select id="session-select" onchange="onSessionChange()">
+      <option value="__live__">● Live</option>
+    </select>
     <button id="theme-toggle" onclick="toggleTheme()">☀ light</button>
     <input id="srv" value="http://localhost:8765" />
     <button onclick="reconnect()">Connect</button>
@@ -583,19 +596,29 @@ const timeLabels = Array(HISTORY).fill('');
 // silently vanishing or being invisible outside the DTC panel.
 let tickCount = 0;
 let lastIgnitionState = 'on';
-const ignitionEvents = []; // { tick }
+const ignitionEvents = []; // live: { tick }, historical: { idx }
 let lastDtcCodes = new Set();
-const dtcEvents = []; // { tick, code }
+const dtcEvents = []; // live: { tick, label }, historical: { idx, label }
+
+// historicalMode + viewLength let the exact same chart/marker code serve both
+// the live rolling HISTORY-point window and a full past-trip replay (which
+// can be any length) — see loadTrip()/resumeLive().
+let historicalMode = false;
+let viewLength = HISTORY;
+
+function resolveIdx(ev) {
+  return historicalMode ? ev.idx : (viewLength - 1 - (tickCount - ev.tick));
+}
 
 function drawEventMarkers(chart, events, color, label) {
   const { ctx, chartArea } = chart;
   for (const ev of events) {
-    const idx = HISTORY - 1 - (tickCount - ev.tick);
-    if (idx < 0 || idx >= HISTORY) continue;
+    const idx = resolveIdx(ev);
+    if (idx < 0 || idx >= viewLength) continue;
     // Points are evenly spaced across the plot area, so derive the pixel
     // directly rather than via the category scale (which chokes on the
     // many duplicate/blank timestamp labels in this data).
-    const x = chartArea.left + (idx / (HISTORY - 1)) * (chartArea.right - chartArea.left);
+    const x = chartArea.left + (idx / (viewLength - 1)) * (chartArea.right - chartArea.left);
     if (x < chartArea.left || x > chartArea.right) continue;
     ctx.beginPath();
     ctx.setLineDash([4, 3]);
@@ -821,6 +844,7 @@ function updateDtcPanel(dtcs) {
 }
 
 function clearDtcs() {
+  if (historicalMode) { alert('Switch to Live to clear DTCs — this is a past trip.'); return; }
   if (!confirm('Clear all DTCs on the ECU? This erases fault memory (codes may reset if the condition persists).')) return;
   fetch(serverBase + '/dtc/clear', { method: 'POST' })
     .then(r => r.json())
@@ -876,7 +900,7 @@ function redrawCharts() {
   setReadout('ro-railv', lastValue('Tension capteur pression rail'), 'V', 2);
 
   if (selectedParam) {
-    chartSelected.data.datasets[0].data = (history[selectedParam] || Array(HISTORY).fill(null)).slice();
+    chartSelected.data.datasets[0].data = (history[selectedParam] || Array(viewLength).fill(null)).slice();
     chartSelected.data.labels = timeLabels.slice();
     chartSelected.update('none');
     setReadout('ro-selected', lastValue(selectedParam), '', 2);
@@ -884,6 +908,7 @@ function redrawCharts() {
 }
 
 function processData(resp) {
+  if (historicalMode) return; // a live poll may already be in flight when the user switches to a past trip
   const ignition = resp.ignition || 'unknown';
   setLogLabel(resp);
 
@@ -949,10 +974,11 @@ function processData(resp) {
 }
 
 function poll() {
+  if (historicalMode) return;
   fetch(serverBase + '/data')
     .then(r => r.json())
     .then(processData)
-    .catch(() => setStatus('err', 'no connection'));
+    .catch(() => { if (!historicalMode) setStatus('err', 'no connection'); });
 }
 
 function reconnect() {
@@ -961,6 +987,7 @@ function reconnect() {
   setStatus('warn', 'connecting…');
   poll();
   polling = setInterval(poll, 400);
+  loadTripList();
 }
 
 function toggleChart(row) {
@@ -968,9 +995,140 @@ function toggleChart(row) {
   row.classList.add('active');
   selectedParam = row.dataset.key;
   document.getElementById('selected-name').textContent = selectedParam;
-  chartSelected.data.datasets[0].data = (history[selectedParam] || Array(HISTORY).fill(null)).slice();
+  chartSelected.data.datasets[0].data = (history[selectedParam] || Array(viewLength).fill(null)).slice();
   chartSelected.data.labels = timeLabels.slice();
   chartSelected.update('none');
+  setReadout('ro-selected', lastValue(selectedParam), '', 2);
+}
+
+// ─── Session browser: live tailing vs. reviewing a past trip's CSV ─────────
+
+function parseTimeLabel(ts) {
+  const m = String(ts).match(/T(\d\d:\d\d:\d\d)/);
+  return m ? m[1] : String(ts);
+}
+
+function parseDtcColumn(val) {
+  return String(val || '').split(';').map(s => s.trim()).filter(Boolean);
+}
+
+function loadTripList() {
+  fetch(serverBase + '/trips')
+    .then(r => r.json())
+    .then(trips => {
+      const sel = document.getElementById('session-select');
+      const current = sel.value;
+      sel.innerHTML = '<option value="__live__">● Live</option>';
+      for (const t of trips) {
+        const opt = document.createElement('option');
+        opt.value = t.filename;
+        const m = t.filename.match(/trip_(\d{4})(\d{2})(\d{2})_(\d{2})(\d{2})(\d{2})/);
+        opt.textContent = m ? `${m[1]}-${m[2]}-${m[3]} ${m[4]}:${m[5]}:${m[6]}` : t.filename;
+        sel.appendChild(opt);
+      }
+      if ([...sel.options].some(o => o.value === current)) sel.value = current;
+    })
+    .catch(() => {});
+}
+
+function onSessionChange() {
+  const sel = document.getElementById('session-select');
+  if (sel.value === '__live__') {
+    resumeLive();
+  } else {
+    loadTrip(sel.value);
+  }
+}
+
+function resumeLive() {
+  historicalMode = false;
+  viewLength = HISTORY;
+  tickCount = 0;
+  lastIgnitionState = 'on';
+  lastDtcCodes = new Set();
+  ignitionEvents.length = 0;
+  dtcEvents.length = 0;
+  for (const key of Object.keys(history)) delete history[key];
+  timeLabels.length = 0;
+  for (let i = 0; i < HISTORY; i++) timeLabels.push('');
+  selectedParam = null;
+  document.getElementById('selected-name').textContent = '— click a row —';
+  document.getElementById('dtc-clear').disabled = false;
+  reconnect();
+}
+
+function loadTrip(filename) {
+  if (polling) { clearInterval(polling); polling = null; }
+  setStatus('warn', 'loading ' + filename + '…');
+  fetch(serverBase + '/trips/' + encodeURIComponent(filename))
+    .then(r => r.json())
+    .then(trip => {
+      historicalMode = true;
+      selectedParam = null;
+      document.getElementById('selected-name').textContent = '— click a row —';
+
+      const n = trip.timestamps.length;
+      viewLength = Math.max(n, 2);
+      timeLabels.length = 0;
+      trip.timestamps.forEach(t => timeLabels.push(parseTimeLabel(t)));
+
+      for (const key of Object.keys(history)) delete history[key];
+      for (const [key, arr] of Object.entries(trip.series)) history[key] = arr;
+
+      // Reconstruct ignition-off gaps: consecutive samples >5s apart.
+      ignitionEvents.length = 0;
+      for (let i = 1; i < n; i++) {
+        const dt = new Date(trip.timestamps[i]) - new Date(trip.timestamps[i - 1]);
+        if (dt > 5000) ignitionEvents.push({ idx: i, label: 'IGN LOST' });
+      }
+
+      // Reconstruct DTC appear events from the "Active DTCs" column.
+      dtcEvents.length = 0;
+      const dtcCol = history['Active DTCs'] || [];
+      let prevCodes = new Set();
+      dtcCol.forEach((val, i) => {
+        const codes = new Set(parseDtcColumn(val));
+        for (const c of codes) {
+          if (!prevCodes.has(c)) dtcEvents.push({ idx: i, label: 'DTC ' + c });
+        }
+        prevCodes = codes;
+      });
+
+      tickCount = n - 1;
+      redrawCharts();
+
+      // Snapshot the sidebar + gauges from the trip's last row.
+      for (const key of Object.keys(trip.series)) {
+        const el = document.getElementById('v-' + key);
+        if (!el) continue;
+        const v = lastValue(key);
+        el.textContent = (typeof v === 'number') ? (v % 1 === 0 ? v : v.toFixed(2)) : (v ?? '—');
+      }
+      const railActual = lastValue('Pression rail actuelle');
+      const railSet = lastValue('Consigne de pression rail');
+      const mprop = lastValue('RCO MPROP');
+      const rpm = lastValue('Régime moteur');
+      updateGauge('g-rail-actual', 'gb-rail-actual', railActual, 1800, {warn: 900, crit: 1400});
+      updateGauge('g-rail-set', 'gb-rail-set', railSet, 1800, null);
+      updateGauge('g-mprop', 'gb-mprop', mprop !== null ? mprop.toFixed(1) : null, 100, {warn: 80, crit: 92});
+      updateGauge('g-rpm', 'gb-rpm', rpm !== null ? Math.round(rpm) : null, 4500, null);
+      checkWarnings({
+        'RCO MPROP': { value: mprop },
+        'Pression rail actuelle': { value: railActual },
+        'Consigne de pression rail': { value: railSet },
+      });
+
+      const lastDtcs = parseDtcColumn(dtcCol[dtcCol.length - 1]).map(code => ({ code, current: true, historical: false }));
+      updateDtcPanel(lastDtcs);
+      document.getElementById('dtc-clear').disabled = true;
+
+      document.getElementById('log-label').textContent = 'reviewing ' + filename;
+      setStatus('warn', 'historical — ' + filename);
+    })
+    .catch(() => {
+      alert('Failed to load trip ' + filename);
+      setStatus('err', 'failed to load trip');
+    });
 }
 
 reconnect();
