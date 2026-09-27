@@ -7,6 +7,28 @@
 <script src="https://cdnjs.cloudflare.com/ajax/libs/Chart.js/4.4.1/chart.umd.js"></script>
 <style>
   :root {
+    --bg: #f5f4f0;
+    --bg2: #ffffff;
+    --bg3: #eae8e2;
+    --border: rgba(0,0,0,0.10);
+    --border2: rgba(0,0,0,0.18);
+    --text: #1c1c1a;
+    --text2: #5c5b57;
+    --text3: #8a8983;
+    --green: #1d9e6f;
+    --amber: #b3720a;
+    --red: #c23b3a;
+    --blue: #1f6fb8;
+    --purple: #6a5fd6;
+    --teal: #147a5c;
+    --grid: rgba(0,0,0,0.07);
+    --scope-bg: #eef1ea;
+    --scope-grid-major: rgba(20,40,20,0.22);
+    --scope-grid-minor: rgba(20,40,20,0.09);
+    --scope-trace-glow: 4px;
+    --font: 'JetBrains Mono', 'Consolas', 'Courier New', monospace;
+  }
+  :root[data-theme="dark"] {
     --bg: #0f0f0f;
     --bg2: #181818;
     --bg3: #222;
@@ -21,7 +43,11 @@
     --blue: #378add;
     --purple: #7f77dd;
     --teal: #1d9e75;
-    --font: 'JetBrains Mono', 'Consolas', 'Courier New', monospace;
+    --grid: rgba(255,255,255,0.05);
+    --scope-bg: #0a0f0a;
+    --scope-grid-major: rgba(120,255,160,0.22);
+    --scope-grid-minor: rgba(120,255,160,0.08);
+    --scope-trace-glow: 6px;
   }
   * { box-sizing: border-box; margin: 0; padding: 0; }
   body {
@@ -169,6 +195,39 @@
     margin-top: 1px;
   }
 
+  .scope-screen {
+    position: relative;
+    background: var(--scope-bg);
+    border-radius: 4px;
+    border: 1px solid var(--border2);
+    box-shadow: inset 0 2px 10px rgba(0,0,0,0.25);
+    overflow: hidden;
+  }
+  .scope-readout {
+    position: absolute;
+    top: 6px;
+    right: 8px;
+    display: flex;
+    gap: 10px;
+    z-index: 5;
+    pointer-events: none;
+  }
+  .scope-readout-chip {
+    background: rgba(0,0,0,0.35);
+    border: 1px solid rgba(255,255,255,0.12);
+    border-radius: 3px;
+    padding: 2px 7px;
+    font-size: 12px;
+    font-variant-numeric: tabular-nums;
+    color: var(--chip-color, #9fe0b0);
+    text-shadow: 0 0 6px currentColor;
+  }
+  :root:not([data-theme="dark"]) .scope-readout-chip {
+    background: rgba(255,255,255,0.55);
+    text-shadow: none;
+    border-color: rgba(0,0,0,0.12);
+  }
+
   #gauge-row {
     display: grid;
     grid-template-columns: repeat(4, 1fr);
@@ -223,6 +282,54 @@
   #warn-banner.show { display: block; }
 
   .divider { border: none; border-top: 1px solid var(--border); margin: 4px 0; }
+
+  #theme-toggle {
+    background: var(--bg3);
+    border: 1px solid var(--border2);
+    border-radius: 4px;
+    color: var(--text2);
+    font-family: var(--font);
+    font-size: 11px;
+    padding: 4px 10px;
+    cursor: pointer;
+  }
+  #theme-toggle:hover { border-color: var(--blue); color: var(--blue); }
+
+  #dtc-panel {
+    background: var(--bg2);
+    border: 1px solid var(--border);
+    border-radius: 6px;
+    padding: 10px 14px;
+    display: flex;
+    align-items: center;
+    gap: 12px;
+    font-size: 12px;
+  }
+  #dtc-panel.has-dtc { border-color: rgba(226,75,74,0.4); background: rgba(226,75,74,0.08); }
+  #dtc-label { color: var(--text2); }
+  #dtc-list { flex: 1; display: flex; flex-wrap: wrap; gap: 6px; }
+  .dtc-chip {
+    background: var(--bg3);
+    border: 1px solid var(--border2);
+    border-radius: 4px;
+    padding: 2px 8px;
+    font-size: 11px;
+    color: var(--red);
+  }
+  #dtc-clear {
+    background: var(--bg3);
+    border: 1px solid var(--border2);
+    border-radius: 4px;
+    color: var(--text2);
+    font-family: var(--font);
+    font-size: 11px;
+    padding: 4px 10px;
+    cursor: pointer;
+    text-transform: uppercase;
+    letter-spacing: 0.06em;
+  }
+  #dtc-clear:hover { border-color: var(--red); color: var(--red); }
+  #dtc-clear:disabled { opacity: 0.4; cursor: default; }
 </style>
 </head>
 <body>
@@ -232,6 +339,7 @@
   <span id="status-label">disconnected</span>
   <span id="log-label" style="color:var(--text3);font-size:11px;"></span>
   <div id="server-url">
+    <button id="theme-toggle" onclick="toggleTheme()">☀ light</button>
     <input id="srv" value="http://localhost:8765" />
     <button onclick="reconnect()">Connect</button>
   </div>
@@ -240,122 +348,128 @@
 <div id="layout">
   <div id="sidebar">
     <div class="section-label">Rail pressure</div>
-    <div class="param-row" data-key="Rail pressure actual" onclick="toggleChart(this)">
+    <div class="param-row" data-key="Pression rail actuelle" onclick="toggleChart(this)">
       <span class="param-name">Actual</span>
-      <span class="param-val" id="v-Rail pressure actual">—</span>
-      <span class="param-unit" id="u-Rail pressure actual">bar</span>
+      <span class="param-val" id="v-Pression rail actuelle">—</span>
+      <span class="param-unit" id="u-Pression rail actuelle">bar</span>
     </div>
-    <div class="param-row active" data-key="Rail pressure setpoint" onclick="toggleChart(this)">
+    <div class="param-row active" data-key="Consigne de pression rail" onclick="toggleChart(this)">
       <span class="param-name">Setpoint</span>
-      <span class="param-val" id="v-Rail pressure setpoint">—</span>
-      <span class="param-unit" id="u-Rail pressure setpoint">bar</span>
+      <span class="param-val" id="v-Consigne de pression rail">—</span>
+      <span class="param-unit" id="u-Consigne de pression rail">bar</span>
     </div>
 
     <div class="section-label">MPROP regulator</div>
-    <div class="param-row" data-key="MPROP duty cycle" onclick="toggleChart(this)">
+    <div class="param-row" data-key="RCO MPROP" onclick="toggleChart(this)">
       <span class="param-name">Duty cycle</span>
-      <span class="param-val" id="v-MPROP duty cycle">—</span>
-      <span class="param-unit" id="u-MPROP duty cycle">%</span>
+      <span class="param-val" id="v-RCO MPROP">—</span>
+      <span class="param-unit" id="u-RCO MPROP">%</span>
     </div>
-    <div class="param-row" data-key="MPROP current actual" onclick="toggleChart(this)">
+    <div class="param-row" data-key="Courant de la MPROP mesuré" onclick="toggleChart(this)">
       <span class="param-name">Current actual</span>
-      <span class="param-val" id="v-MPROP current actual">—</span>
-      <span class="param-unit" id="u-MPROP current actual">mA</span>
+      <span class="param-val" id="v-Courant de la MPROP mesuré">—</span>
+      <span class="param-unit" id="u-Courant de la MPROP mesuré">mA</span>
     </div>
-    <div class="param-row" data-key="MPROP current setpoint" onclick="toggleChart(this)">
+    <div class="param-row" data-key="Consigne de courant de la MPROP" onclick="toggleChart(this)">
       <span class="param-name">Current setpoint</span>
-      <span class="param-val" id="v-MPROP current setpoint">—</span>
-      <span class="param-unit" id="u-MPROP current setpoint">mA</span>
+      <span class="param-val" id="v-Consigne de courant de la MPROP">—</span>
+      <span class="param-unit" id="u-Consigne de courant de la MPROP">mA</span>
     </div>
 
     <div class="section-label">Fuelling</div>
-    <div class="param-row" data-key="Demanded qty" onclick="toggleChart(this)">
+    <div class="param-row" data-key="Débit désiré avant limitation système et sans LiGov" onclick="toggleChart(this)">
       <span class="param-name">Demanded</span>
-      <span class="param-val" id="v-Demanded qty">—</span>
-      <span class="param-unit" id="u-Demanded qty">mg/c</span>
+      <span class="param-val" id="v-Débit désiré avant limitation système et sans LiGov">—</span>
+      <span class="param-unit" id="u-Débit désiré avant limitation système et sans LiGov">mg/c</span>
     </div>
-    <div class="param-row" data-key="Actual qty" onclick="toggleChart(this)">
+    <div class="param-row" data-key="Débit injecté" onclick="toggleChart(this)">
       <span class="param-name">Actual</span>
-      <span class="param-val" id="v-Actual qty">—</span>
-      <span class="param-unit" id="u-Actual qty">mg/c</span>
+      <span class="param-val" id="v-Débit injecté">—</span>
+      <span class="param-unit" id="u-Débit injecté">mg/c</span>
     </div>
-    <div class="param-row" data-key="Max qty limit" onclick="toggleChart(this)">
+    <div class="param-row" data-key="Débit maximal" onclick="toggleChart(this)">
       <span class="param-name">Max limit</span>
-      <span class="param-val" id="v-Max qty limit">—</span>
-      <span class="param-unit" id="u-Max qty limit">mg/c</span>
+      <span class="param-val" id="v-Débit maximal">—</span>
+      <span class="param-unit" id="u-Débit maximal">mg/c</span>
     </div>
 
     <div class="section-label">Per-cylinder qty</div>
-    <div class="param-row" data-key="Cyl1 qty" onclick="toggleChart(this)">
+    <div class="param-row" data-key="Débit poste à poste 1" onclick="toggleChart(this)">
       <span class="param-name">Cyl 1</span>
-      <span class="param-val" id="v-Cyl1 qty">—</span>
-      <span class="param-unit" id="u-Cyl1 qty">mg/c</span>
+      <span class="param-val" id="v-Débit poste à poste 1">—</span>
+      <span class="param-unit" id="u-Débit poste à poste 1">mg/c</span>
     </div>
-    <div class="param-row" data-key="Cyl2 qty" onclick="toggleChart(this)">
+    <div class="param-row" data-key="Débit poste à poste 2" onclick="toggleChart(this)">
       <span class="param-name">Cyl 2</span>
-      <span class="param-val" id="v-Cyl2 qty">—</span>
-      <span class="param-unit" id="u-Cyl2 qty">mg/c</span>
+      <span class="param-val" id="v-Débit poste à poste 2">—</span>
+      <span class="param-unit" id="u-Débit poste à poste 2">mg/c</span>
     </div>
-    <div class="param-row" data-key="Cyl3 qty" onclick="toggleChart(this)">
+    <div class="param-row" data-key="Débit poste à poste 3" onclick="toggleChart(this)">
       <span class="param-name">Cyl 3</span>
-      <span class="param-val" id="v-Cyl3 qty">—</span>
-      <span class="param-unit" id="u-Cyl3 qty">mg/c</span>
+      <span class="param-val" id="v-Débit poste à poste 3">—</span>
+      <span class="param-unit" id="u-Débit poste à poste 3">mg/c</span>
     </div>
-    <div class="param-row" data-key="Cyl4 qty" onclick="toggleChart(this)">
+    <div class="param-row" data-key="Débit poste à poste 4" onclick="toggleChart(this)">
       <span class="param-name">Cyl 4</span>
-      <span class="param-val" id="v-Cyl4 qty">—</span>
-      <span class="param-unit" id="u-Cyl4 qty">mg/c</span>
+      <span class="param-val" id="v-Débit poste à poste 4">—</span>
+      <span class="param-unit" id="u-Débit poste à poste 4">mg/c</span>
     </div>
 
     <hr class="divider">
     <div class="section-label">Engine</div>
-    <div class="param-row" data-key="RPM" onclick="toggleChart(this)">
+    <div class="param-row" data-key="Régime moteur" onclick="toggleChart(this)">
       <span class="param-name">RPM</span>
-      <span class="param-val" id="v-RPM">—</span>
-      <span class="param-unit" id="u-RPM">rpm</span>
+      <span class="param-val" id="v-Régime moteur">—</span>
+      <span class="param-unit" id="u-Régime moteur">rpm</span>
     </div>
-    <div class="param-row" data-key="Engine torque actual" onclick="toggleChart(this)">
+    <div class="param-row" data-key="Couple Moteur effectif" onclick="toggleChart(this)">
       <span class="param-name">Torque</span>
-      <span class="param-val" id="v-Engine torque actual">—</span>
-      <span class="param-unit" id="u-Engine torque actual">Nm</span>
+      <span class="param-val" id="v-Couple Moteur effectif">—</span>
+      <span class="param-unit" id="u-Couple Moteur effectif">Nm</span>
     </div>
-    <div class="param-row" data-key="Accel pedal %" onclick="toggleChart(this)">
+    <div class="param-row" data-key="Ratio pédale accélérateur" onclick="toggleChart(this)">
       <span class="param-name">Accel pedal</span>
-      <span class="param-val" id="v-Accel pedal %">—</span>
-      <span class="param-unit" id="u-Accel pedal %">%</span>
+      <span class="param-val" id="v-Ratio pédale accélérateur">—</span>
+      <span class="param-unit" id="u-Ratio pédale accélérateur">%</span>
     </div>
 
     <hr class="divider">
     <div class="section-label">Sensors</div>
-    <div class="param-row" data-key="Water temp" onclick="toggleChart(this)">
+    <div class="param-row" data-key="Température eau" onclick="toggleChart(this)">
       <span class="param-name">Water temp</span>
-      <span class="param-val" id="v-Water temp">—</span>
-      <span class="param-unit" id="u-Water temp">°C</span>
+      <span class="param-val" id="v-Température eau">—</span>
+      <span class="param-unit" id="u-Température eau">°C</span>
     </div>
-    <div class="param-row" data-key="Fuel temp" onclick="toggleChart(this)">
+    <div class="param-row" data-key="Température carburant" onclick="toggleChart(this)">
       <span class="param-name">Fuel temp</span>
-      <span class="param-val" id="v-Fuel temp">—</span>
-      <span class="param-unit" id="u-Fuel temp">°C</span>
+      <span class="param-val" id="v-Température carburant">—</span>
+      <span class="param-unit" id="u-Température carburant">°C</span>
     </div>
-    <div class="param-row" data-key="Batt voltage" onclick="toggleChart(this)">
+    <div class="param-row" data-key="Tension batterie" onclick="toggleChart(this)">
       <span class="param-name">Battery</span>
-      <span class="param-val" id="v-Batt voltage">—</span>
-      <span class="param-unit" id="u-Batt voltage">V</span>
+      <span class="param-val" id="v-Tension batterie">—</span>
+      <span class="param-unit" id="u-Tension batterie">V</span>
     </div>
-    <div class="param-row" data-key="Fuel pressure (LP)" onclick="toggleChart(this)">
-      <span class="param-name">LP fuel press</span>
-      <span class="param-val" id="v-Fuel pressure (LP)">—</span>
-      <span class="param-unit" id="u-Fuel pressure (LP)">bar</span>
+    <div class="param-row" data-key="Pression carburant" onclick="toggleChart(this)">
+      <span class="param-name" title="Pression carburant — tracks rail pressure closely; likely a duplicate/alternate telemetry channel, not a separate LP-side sensor (this vehicle has none)">Fuel pressure (raw)</span>
+      <span class="param-val" id="v-Pression carburant">—</span>
+      <span class="param-unit" id="u-Pression carburant">bar</span>
     </div>
-    <div class="param-row" data-key="Rail sensor voltage" onclick="toggleChart(this)">
+    <div class="param-row" data-key="Tension capteur pression rail" onclick="toggleChart(this)">
       <span class="param-name">Rail sensor V</span>
-      <span class="param-val" id="v-Rail sensor voltage">—</span>
-      <span class="param-unit" id="u-Rail sensor voltage">V</span>
+      <span class="param-val" id="v-Tension capteur pression rail">—</span>
+      <span class="param-unit" id="u-Tension capteur pression rail">V</span>
     </div>
   </div>
 
   <div id="main">
     <div id="warn-banner" role="alert">⚠ PUMP SATURATION — MPROP duty at max, rail pressure below setpoint. HP pump cannot meet demand.</div>
+
+    <div id="dtc-panel">
+      <span id="dtc-label">DTCs: none active</span>
+      <div id="dtc-list"></div>
+      <button id="dtc-clear" onclick="clearDtcs()" disabled>Clear DTCs</button>
+    </div>
 
     <div id="gauge-row">
       <div class="gauge-card">
@@ -392,7 +506,13 @@
           <div class="legend-item"><div class="legend-swatch dashed" style="border-color:var(--text3)"></div>Setpoint</div>
         </div>
       </div>
-      <div style="position:relative;height:180px"><canvas id="chartRail" role="img" aria-label="Rail pressure actual vs setpoint over time">Live rail pressure data</canvas></div>
+      <div class="scope-screen" style="height:180px">
+        <div class="scope-readout">
+          <span class="scope-readout-chip" id="ro-rail-actual" style="--chip-color:var(--blue)">—</span>
+          <span class="scope-readout-chip" id="ro-rail-set" style="--chip-color:var(--text3)">—</span>
+        </div>
+        <canvas id="chartRail" role="img" aria-label="Rail pressure actual vs setpoint over time">Live rail pressure data</canvas>
+      </div>
     </div>
 
     <div class="chart-card">
@@ -403,7 +523,30 @@
           <div class="legend-item"><div class="legend-swatch" style="background:var(--purple)"></div>RPM ÷ 60</div>
         </div>
       </div>
-      <div style="position:relative;height:140px"><canvas id="chartMprop" role="img" aria-label="MPROP duty cycle and RPM over time">Live MPROP data</canvas></div>
+      <div class="scope-screen" style="height:140px">
+        <div class="scope-readout">
+          <span class="scope-readout-chip" id="ro-mprop" style="--chip-color:var(--amber)">—</span>
+          <span class="scope-readout-chip" id="ro-rpm" style="--chip-color:var(--purple)">—</span>
+        </div>
+        <canvas id="chartMprop" role="img" aria-label="MPROP duty cycle and RPM over time">Live MPROP data</canvas>
+      </div>
+    </div>
+
+    <div class="chart-card">
+      <div class="chart-title">
+        Voltages — battery &amp; rail pressure sensor
+        <div class="legend">
+          <div class="legend-item"><div class="legend-swatch" style="background:var(--teal)"></div>Battery (V)</div>
+          <div class="legend-item"><div class="legend-swatch" style="background:var(--purple)"></div>Rail sensor (V)</div>
+        </div>
+      </div>
+      <div class="scope-screen" style="height:140px">
+        <div class="scope-readout">
+          <span class="scope-readout-chip" id="ro-batt" style="--chip-color:var(--teal)">—</span>
+          <span class="scope-readout-chip" id="ro-railv" style="--chip-color:var(--purple)">—</span>
+        </div>
+        <canvas id="chartVolt" role="img" aria-label="Battery and rail sensor voltage over time">Live voltage data</canvas>
+      </div>
     </div>
 
     <div class="chart-card">
@@ -413,7 +556,12 @@
           <div class="legend-item"><div class="legend-swatch" style="background:var(--green)"></div><span id="selected-name">— click a row —</span></div>
         </div>
       </div>
-      <div style="position:relative;height:140px"><canvas id="chartSelected" role="img" aria-label="Selected parameter over time">Live selected parameter</canvas></div>
+      <div class="scope-screen" style="height:140px">
+        <div class="scope-readout">
+          <span class="scope-readout-chip" id="ro-selected" style="--chip-color:var(--green)">—</span>
+        </div>
+        <canvas id="chartSelected" role="img" aria-label="Selected parameter over time">Live selected parameter</canvas>
+      </div>
     </div>
 
   </div>
@@ -430,42 +578,149 @@ let selectedParam = null;
 const history = {};
 const timeLabels = Array(HISTORY).fill('');
 
-// Shared timeline position + ignition-lost markers, drawn on every chart so a
-// blip is visible as a gap with a marker instead of silently vanishing.
+// Shared timeline position + event markers (ignition-lost, DTC), drawn on
+// every chart so a blip/fault is visible as a real gap+marker rather than
+// silently vanishing or being invisible outside the DTC panel.
 let tickCount = 0;
 let lastIgnitionState = 'on';
 const ignitionEvents = []; // { tick }
+let lastDtcCodes = new Set();
+const dtcEvents = []; // { tick, code }
 
-const ignitionMarkerPlugin = {
-  id: 'ignitionMarker',
+function drawEventMarkers(chart, events, color, label) {
+  const { ctx, chartArea } = chart;
+  for (const ev of events) {
+    const idx = HISTORY - 1 - (tickCount - ev.tick);
+    if (idx < 0 || idx >= HISTORY) continue;
+    // Points are evenly spaced across the plot area, so derive the pixel
+    // directly rather than via the category scale (which chokes on the
+    // many duplicate/blank timestamp labels in this data).
+    const x = chartArea.left + (idx / (HISTORY - 1)) * (chartArea.right - chartArea.left);
+    if (x < chartArea.left || x > chartArea.right) continue;
+    ctx.beginPath();
+    ctx.setLineDash([4, 3]);
+    ctx.lineWidth = 1.5;
+    ctx.strokeStyle = color;
+    ctx.moveTo(x, chartArea.top);
+    ctx.lineTo(x, chartArea.bottom);
+    ctx.stroke();
+    ctx.setLineDash([]);
+    ctx.fillStyle = color;
+    ctx.font = '9px JetBrains Mono, monospace';
+    ctx.fillText(ev.label || label, x + 3, chartArea.top + 10);
+  }
+}
+
+const eventMarkerPlugin = {
+  id: 'eventMarkers',
   afterDatasetsDraw(chart) {
     const { ctx, chartArea } = chart;
     if (!chartArea) return;
     ctx.save();
-    for (const ev of ignitionEvents) {
-      const idx = HISTORY - 1 - (tickCount - ev.tick);
-      if (idx < 0 || idx >= HISTORY) continue;
-      // Points are evenly spaced across the plot area, so derive the pixel
-      // directly rather than via the category scale (which chokes on the
-      // many duplicate/blank timestamp labels in this data).
-      const x = chartArea.left + (idx / (HISTORY - 1)) * (chartArea.right - chartArea.left);
-      if (x < chartArea.left || x > chartArea.right) continue;
-      ctx.beginPath();
-      ctx.setLineDash([4, 3]);
-      ctx.lineWidth = 1.5;
-      ctx.strokeStyle = 'rgba(226,75,74,0.7)';
-      ctx.moveTo(x, chartArea.top);
-      ctx.lineTo(x, chartArea.bottom);
-      ctx.stroke();
-      ctx.setLineDash([]);
-      ctx.fillStyle = 'rgba(226,75,74,0.9)';
-      ctx.font = '9px JetBrains Mono, monospace';
-      ctx.fillText('IGN LOST', x + 3, chartArea.top + 10);
-    }
+    drawEventMarkers(chart, ignitionEvents, 'rgba(226,75,74,0.75)', 'IGN LOST');
+    drawEventMarkers(chart, dtcEvents, 'rgba(211,150,20,0.85)', 'DTC');
     ctx.restore();
   }
 };
-Chart.register(ignitionMarkerPlugin);
+Chart.register(eventMarkerPlugin);
+
+// Oscilloscope-style graticule: a fixed 10x8 division grid (with 5x minor
+// subdivisions and a brighter center crosshair) drawn under the traces,
+// independent of the data scale — purely a "scope screen" backdrop.
+const SCOPE_COLS = 10, SCOPE_ROWS = 8;
+const scopeGridPlugin = {
+  id: 'scopeGrid',
+  beforeDraw(chart) {
+    const { ctx, chartArea } = chart;
+    if (!chartArea) return;
+    const styles = getComputedStyle(document.documentElement);
+    const major = styles.getPropertyValue('--scope-grid-major').trim() || 'rgba(120,255,160,0.2)';
+    const minor = styles.getPropertyValue('--scope-grid-minor').trim() || 'rgba(120,255,160,0.08)';
+    const { left, right, top, bottom } = chartArea;
+    const w = right - left, h = bottom - top;
+    ctx.save();
+
+    ctx.strokeStyle = minor;
+    ctx.lineWidth = 1;
+    ctx.beginPath();
+    const subCols = SCOPE_COLS * 5, subRows = SCOPE_ROWS * 5;
+    for (let i = 1; i < subCols; i++) {
+      if (i % 5 === 0) continue;
+      const x = Math.round(left + (i / subCols) * w) + 0.5;
+      ctx.moveTo(x, top); ctx.lineTo(x, bottom);
+    }
+    for (let j = 1; j < subRows; j++) {
+      if (j % 5 === 0) continue;
+      const y = Math.round(top + (j / subRows) * h) + 0.5;
+      ctx.moveTo(left, y); ctx.lineTo(right, y);
+    }
+    ctx.stroke();
+
+    ctx.strokeStyle = major;
+    ctx.lineWidth = 1;
+    ctx.beginPath();
+    for (let i = 1; i < SCOPE_COLS; i++) {
+      const x = Math.round(left + (i / SCOPE_COLS) * w) + 0.5;
+      ctx.moveTo(x, top); ctx.lineTo(x, bottom);
+    }
+    for (let j = 1; j < SCOPE_ROWS; j++) {
+      const y = Math.round(top + (j / SCOPE_ROWS) * h) + 0.5;
+      ctx.moveTo(left, y); ctx.lineTo(right, y);
+    }
+    ctx.stroke();
+
+    ctx.lineWidth = 1.25;
+    ctx.beginPath();
+    const midX = Math.round(left + w / 2) + 0.5, midY = Math.round(top + h / 2) + 0.5;
+    ctx.moveTo(midX, top); ctx.lineTo(midX, bottom);
+    ctx.moveTo(left, midY); ctx.lineTo(right, midY);
+    ctx.stroke();
+
+    ctx.strokeRect(left + 0.5, top + 0.5, w - 1, h - 1);
+    ctx.restore();
+  }
+};
+Chart.register(scopeGridPlugin);
+
+// Faint phosphor-style glow behind each trace line.
+const glowPlugin = {
+  id: 'lineGlow',
+  beforeDatasetDraw(chart, args) {
+    const color = args.meta?.dataset?.options?.borderColor;
+    const styles = getComputedStyle(document.documentElement);
+    const glow = parseFloat(styles.getPropertyValue('--scope-trace-glow')) || 4;
+    chart.ctx.save();
+    chart.ctx.shadowColor = color || 'transparent';
+    chart.ctx.shadowBlur = glow;
+  },
+  afterDatasetDraw(chart) {
+    chart.ctx.restore();
+  }
+};
+Chart.register(glowPlugin);
+
+function applyTheme(theme) {
+  document.documentElement.setAttribute('data-theme', theme);
+  const btn = document.getElementById('theme-toggle');
+  if (btn) btn.textContent = theme === 'dark' ? '🌙 dark' : '☀ light';
+  try { localStorage.setItem('edc16-theme', theme); } catch (e) {}
+}
+
+function toggleTheme() {
+  const current = document.documentElement.getAttribute('data-theme') || 'light';
+  applyTheme(current === 'dark' ? 'light' : 'dark');
+  // Canvas colors (var(--...) strings) only re-resolve on the next paint a
+  // chart actually performs, so force one for every chart after switching.
+  for (const c of [chartRail, chartMprop, chartVolt, chartSelected]) {
+    if (c) c.update('none');
+  }
+}
+
+(function initTheme() {
+  let saved = 'light';
+  try { saved = localStorage.getItem('edc16-theme') || 'light'; } catch (e) {}
+  applyTheme(saved);
+})();
 
 function makeChart(id, datasets, yLabel, yMax) {
   const cfg = {
@@ -479,12 +734,13 @@ function makeChart(id, datasets, yLabel, yMax) {
         y: {
           display: true, position: 'right',
           max: yMax || undefined,
-          grid: { color: 'rgba(255,255,255,0.05)' },
-          ticks: { color: '#555', font: { family: 'JetBrains Mono, monospace', size: 10 } },
-          title: { display: !!yLabel, text: yLabel, color: '#444', font: { size: 10 } }
+          grid: { display: false },
+          border: { display: false },
+          ticks: { count: 9, color: 'var(--text3)', font: { family: 'JetBrains Mono, monospace', size: 10 } },
+          title: { display: !!yLabel, text: yLabel, color: 'var(--text3)', font: { size: 10 } }
         }
       },
-      elements: { point: { radius: 0 }, line: { tension: 0.3, borderWidth: 1.5 } }
+      elements: { point: { radius: 0 }, line: { tension: 0.3, borderWidth: 1.75 } }
     }
   };
   return new Chart(document.getElementById(id), cfg);
@@ -499,6 +755,11 @@ const chartMprop = makeChart('chartMprop', [
   { label: 'MPROP duty', data: Array(HISTORY).fill(null), borderColor: '#ef9f27', fill: false },
   { label: 'RPM/60', data: Array(HISTORY).fill(null), borderColor: '#7f77dd', fill: false },
 ], '%', 110);
+
+const chartVolt = makeChart('chartVolt', [
+  { label: 'Battery', data: Array(HISTORY).fill(null), borderColor: '#1d9e75', fill: false },
+  { label: 'Rail sensor', data: Array(HISTORY).fill(null), borderColor: '#7f77dd', fill: false },
+], 'V', null);
 
 const chartSelected = makeChart('chartSelected', [
   { label: 'Selected', data: Array(HISTORY).fill(null), borderColor: '#5dca9a', fill: false },
@@ -535,11 +796,36 @@ function updateGauge(id, barId, val, max, thresholds) {
 
 function checkWarnings(data) {
   const banner = document.getElementById('warn-banner');
-  const mprop = data['MPROP duty cycle']?.value;
-  const actual = data['Rail pressure actual']?.value;
-  const setpt = data['Rail pressure setpoint']?.value;
+  const mprop = data['RCO MPROP']?.value;
+  const actual = data['Pression rail actuelle']?.value;
+  const setpt = data['Consigne de pression rail']?.value;
   const saturated = mprop > 90 && actual !== null && setpt !== null && (setpt - actual) > 50;
   banner.classList.toggle('show', !!saturated);
+}
+
+function updateDtcPanel(dtcs) {
+  const panel = document.getElementById('dtc-panel');
+  const label = document.getElementById('dtc-label');
+  const list = document.getElementById('dtc-list');
+  const clearBtn = document.getElementById('dtc-clear');
+  panel.classList.toggle('has-dtc', dtcs.length > 0);
+  label.textContent = dtcs.length ? `DTCs: ${dtcs.length} active` : 'DTCs: none active';
+  list.innerHTML = '';
+  for (const d of dtcs) {
+    const chip = document.createElement('span');
+    chip.className = 'dtc-chip';
+    chip.textContent = d.code + (d.current ? '' : ' (hist)');
+    list.appendChild(chip);
+  }
+  clearBtn.disabled = dtcs.length === 0;
+}
+
+function clearDtcs() {
+  if (!confirm('Clear all DTCs on the ECU? This erases fault memory (codes may reset if the condition persists).')) return;
+  fetch(serverBase + '/dtc/clear', { method: 'POST' })
+    .then(r => r.json())
+    .then(r => { if (!r.ok) alert('Clear DTCs failed — check the server log.'); })
+    .catch(() => alert('Clear DTCs failed — no connection.'));
 }
 
 function setLogLabel(resp) {
@@ -551,22 +837,49 @@ function setLogLabel(resp) {
   }
 }
 
+function lastValue(key) {
+  const arr = history[key];
+  if (!arr) return null;
+  for (let i = arr.length - 1; i >= 0; i--) {
+    if (arr[i] !== null) return arr[i];
+  }
+  return null;
+}
+
+function setReadout(id, val, unit, digits) {
+  const el = document.getElementById(id);
+  if (!el) return;
+  el.textContent = val === null ? '—' : val.toFixed(digits ?? 1) + (unit ? ' ' + unit : '');
+}
+
 function redrawCharts() {
-  updateChart(chartRail, 0, history['Rail pressure actual'] || []);
-  updateChart(chartRail, 1, history['Rail pressure setpoint'] || []);
+  updateChart(chartRail, 0, history['Pression rail actuelle'] || []);
+  updateChart(chartRail, 1, history['Consigne de pression rail'] || []);
   chartRail.data.labels = timeLabels.slice();
   chartRail.update('none');
+  setReadout('ro-rail-actual', lastValue('Pression rail actuelle'), 'bar');
+  setReadout('ro-rail-set', lastValue('Consigne de pression rail'), 'bar');
 
-  const rpmDiv = (history['RPM'] || []).map(v => v !== null ? v / 60 : null);
-  updateChart(chartMprop, 0, history['MPROP duty cycle'] || []);
+  const rpmDiv = (history['Régime moteur'] || []).map(v => v !== null ? v / 60 : null);
+  updateChart(chartMprop, 0, history['RCO MPROP'] || []);
   updateChart(chartMprop, 1, rpmDiv);
   chartMprop.data.labels = timeLabels.slice();
   chartMprop.update('none');
+  setReadout('ro-mprop', lastValue('RCO MPROP'), '%');
+  setReadout('ro-rpm', lastValue('Régime moteur'), 'rpm', 0);
+
+  updateChart(chartVolt, 0, history['Tension batterie'] || []);
+  updateChart(chartVolt, 1, history['Tension capteur pression rail'] || []);
+  chartVolt.data.labels = timeLabels.slice();
+  chartVolt.update('none');
+  setReadout('ro-batt', lastValue('Tension batterie'), 'V', 2);
+  setReadout('ro-railv', lastValue('Tension capteur pression rail'), 'V', 2);
 
   if (selectedParam) {
     chartSelected.data.datasets[0].data = (history[selectedParam] || Array(HISTORY).fill(null)).slice();
     chartSelected.data.labels = timeLabels.slice();
     chartSelected.update('none');
+    setReadout('ro-selected', lastValue(selectedParam), '', 2);
   }
 }
 
@@ -589,6 +902,17 @@ function processData(resp) {
     ignitionEvents.shift();
   }
 
+  const dtcs = resp.dtcs || [];
+  const dtcCodes = new Set(dtcs.map(d => d.code));
+  for (const code of dtcCodes) {
+    if (!lastDtcCodes.has(code)) dtcEvents.push({ tick: tickCount, label: 'DTC ' + code });
+  }
+  lastDtcCodes = dtcCodes;
+  while (dtcEvents.length && (tickCount - dtcEvents[0].tick) > HISTORY) {
+    dtcEvents.shift();
+  }
+  updateDtcPanel(dtcs);
+
   if (ignition === 'off') {
     setStatus('warn', 'ignition off — waiting for engine start');
     document.getElementById('warn-banner').classList.remove('show');
@@ -608,10 +932,10 @@ function processData(resp) {
     pushHistory(key, obj.value ?? null);
   }
 
-  const railActual = data['Rail pressure actual']?.value ?? null;
-  const railSet = data['Rail pressure setpoint']?.value ?? null;
-  const mprop = data['MPROP duty cycle']?.value ?? null;
-  const rpm = data['RPM']?.value ?? null;
+  const railActual = data['Pression rail actuelle']?.value ?? null;
+  const railSet = data['Consigne de pression rail']?.value ?? null;
+  const mprop = data['RCO MPROP']?.value ?? null;
+  const rpm = data['Régime moteur']?.value ?? null;
 
   updateGauge('g-rail-actual', 'gb-rail-actual', railActual, 1800, {warn: 900, crit: 1400});
   updateGauge('g-rail-set', 'gb-rail-set', railSet, 1800, null);

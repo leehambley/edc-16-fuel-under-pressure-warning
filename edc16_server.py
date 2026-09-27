@@ -29,92 +29,69 @@ from datetime import datetime
 from http.server import HTTPServer, BaseHTTPRequestHandler
 from pathlib import Path
 
+from edc16_trames import TRAMES
+
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
 log = logging.getLogger("edc16")
 
-# ─── KWP2000 frame definitions from EDC16_C3_VCD-X70 XML ─────────────────────
-# Each trame: (send_bytes_hex, expected_min_bytes, {param_name: (first_byte, n_bits, signed, step, unit)})
-# first_byte is 1-indexed per DDT convention; we use 0-indexed in decode (subtract 1)
-# All multi-byte values are big-endian signed int16 unless noted
-
-TRAMES = {
-    "A0": {
-        "cmd": bytes.fromhex("21A0"),
-        "min_bytes": 16,
-        "params": {
-            "RPM":           (13, 16, True,  1.0,    "rpm"),
-            "Vehicle speed": (15, 16, True,  0.01,   "km/h"),
-        },
-    },
-    "A1": {
-        "cmd": bytes.fromhex("21A1"),
-        "min_bytes": 63,
-        "params": {
-            "Fuel temp":     (29, 16, True,  0.1,    "°C"),
-            "Water temp":    (25, 16, True,  0.1,    "°C"),
-            "Fuel pressure (LP)": (37, 16, True, 100.0, "hPa"),
-            "Batt voltage":  (41, 16, True,  0.001,  "V"),
-            "Accel pedal %": (58, 16, True,  0.01,   "%"),
-        },
-    },
-    "A5": {
-        "cmd": bytes.fromhex("21A5"),
-        "min_bytes": 63,
-        "params": {
-            "Demanded qty":   (5,  16, True,  0.01, "mg/cyc"),
-            "Actual qty":     (7,  16, True,  0.01, "mg/cyc"),
-            "Engine qty":     (9,  16, True,  0.01, "mg/cyc"),
-            "Max qty limit":  (13, 16, True,  0.01, "mg/cyc"),
-            "Cyl1 qty":       (37, 16, True,  0.01, "mg/cyc"),
-            "Cyl2 qty":       (39, 16, True,  0.01, "mg/cyc"),
-            "Cyl3 qty":       (43, 16, True,  0.01, "mg/cyc"),
-            "Cyl4 qty":       (45, 16, True,  0.01, "mg/cyc"),
-        },
-    },
-    "A6": {
-        "cmd": bytes.fromhex("21A6"),
-        "min_bytes": 63,
-        "params": {
-            "Rail pressure actual":   (35, 16, True,  100.0, "hPa"),
-            "Rail pressure setpoint": (37, 16, True,  100.0, "hPa"),
-            "Rail sensor voltage":    (33, 16, True,  4.88758553, "mV"),
-            "MPROP current setpoint": (39, 16, True,  1.0,  "mA"),
-            "MPROP current actual":   (41, 16, True,  1.0,  "mA"),
-            "MPROP duty cycle":       (43, 16, True,  0.01, "%"),
-            "Engine torque actual":   (3,  16, True,  0.1,  "Nm"),
-            "Torque internal":        (23, 16, True,  0.1,  "Nm"),
-        },
-    },
-}
+# ─── KWP2000 frame definitions ────────────────────────────────────────────────
+# TRAMES (imported from edc16_trames.py) is generated straight from Renault's
+# own DDT4ALL ECU definition — see tools/gen_trames.py. Covers trames A0-A8,
+# 263 named analog signals total, in their original French names.
 
 # Flat, stable list of every param name across all trames — used as the CSV header
 # so column order never changes between trips even if a poll misses some trames.
-ALL_PARAMS = [p for trame in TRAMES.values() for p in trame["params"]]
+# Every trame also gets a "<name>_raw" column holding the full hex response, so
+# any PID we haven't decoded by name yet is still captured verbatim.
+ALL_PARAMS = []
+for _name, _trame in TRAMES.items():
+    ALL_PARAMS.extend(_trame["params"].keys())
+    ALL_PARAMS.append(f"{_name}_raw")
+ALL_PARAMS.append("Active DTCs")
 
 # How many consecutive fully-empty poll cycles (all trames unanswered) before we
 # decide the K-line has gone quiet because the ignition was switched off.
 IGNITION_OFF_CYCLES = 5
 
-# Human-readable display names and grouping for the UI
+# Curated groups for the most driving-relevant signals; everything else in
+# ALL_PARAMS (263 signals total, plus raw hex per trame) still gets logged to
+# CSV and shown in the dashboard's "Other" catch-all — nothing is hidden.
 PARAM_GROUPS = {
-    "Rail pressure": ["Rail pressure actual", "Rail pressure setpoint"],
-    "MPROP regulator": ["MPROP duty cycle", "MPROP current actual", "MPROP current setpoint"],
-    "Fuelling": ["Demanded qty", "Actual qty", "Max qty limit"],
-    "Per-cylinder qty": ["Cyl1 qty", "Cyl2 qty", "Cyl3 qty", "Cyl4 qty"],
-    "Engine": ["RPM", "Vehicle speed", "Engine torque actual"],
-    "Sensors": ["Batt voltage", "Water temp", "Fuel temp", "Fuel pressure (LP)", "Rail sensor voltage"],
+    "Rail pressure": ["Pression rail actuelle", "Consigne de pression rail", "Tension capteur pression rail"],
+    "MPROP regulator": ["RCO MPROP", "Courant de la MPROP mesuré", "Consigne de courant de la MPROP"],
+    "Fuelling": ["Débit injecté", "Débit désiré avant limitation système et sans LiGov", "Débit maximal", "Débit moteur (avec ASD)"],
+    "Per-injection qty": ["Débit poste à poste 1", "Débit poste à poste 2", "Débit poste à poste 3", "Débit poste à poste 4"],
+    "Engine": ["Régime moteur", "Vitesse véhicule", "Couple Moteur effectif", "Ratio pédale accélérateur"],
+    "Turbo / EGR": ["PAVT", "Consigne pression suralimentation", "RCO turbo", "RCO vanne EGR", "Ecart pression turbo"],
+    "DPF (FàP)": [
+        "PFlt_mSot - Masse de suie dans le FàP",
+        "PFlt_pDiff - Pression différentielle dans le FàP",
+        "Pression avant FàP",
+        "PFltCD_tPre - Température avant FàP",
+        "PFltCD_tPst - Température après FàP",
+    ],
+    "Sensors": ["Tension batterie", "Température eau", "Température carburant", "Température air", "Température huile", "Pression carburant"],
 }
+_grouped = {p for names in PARAM_GROUPS.values() for p in names}
+PARAM_GROUPS["Other"] = [p for p in ALL_PARAMS if p not in _grouped and not p.endswith("_raw")]
 
-def decode_value(data: bytes, first_byte_1idx: int, n_bits: int, signed: bool, step: float) -> float:
-    """Decode a value from a KWP2000 response frame."""
+
+def decode_value(data: bytes, first_byte_1idx: int, n_bits: int, signed: bool, scale: float, offset: float = 0.0) -> float:
+    """Decode a value from a KWP2000 response frame.
+
+    n_bits is 16 for a normal word, or 31 for a "large" counter (odometer,
+    engine-run-time, ...) that DDT4ALL stores as a full 4-byte big-endian word.
+    """
     idx = first_byte_1idx - 1  # convert to 0-indexed
     if n_bits == 16:
         raw = struct.unpack_from(">h" if signed else ">H", data, idx)[0]
+    elif n_bits == 31:
+        raw = struct.unpack_from(">i" if signed else ">I", data, idx)[0]
     elif n_bits == 8:
         raw = struct.unpack_from(">b" if signed else ">B", data, idx)[0]
     else:
         raw = 0
-    return raw * step
+    return raw * scale + offset
 
 
 class TripLogger:
@@ -202,14 +179,18 @@ class ELM327:
         log.info("ELM327 configured.")
 
     def kwp_init(self):
-        """Trigger KWP2000 session init (slow-init 0x7A address for ECU)."""
-        log.info("Starting KWP2000 session (address 7A)...")
-        r = self._send_raw("ATSH7A")
-        log.debug(f"ATSH7A -> {r!r}")
-        # Send StartDiagnosticSession
-        r = self._send_raw("1081")
-        log.info(f"StartDiagnosticSession -> {r!r}")
-        time.sleep(0.1)
+        """Address the EDC16 ECU (KWP2000 fast-init, target 0x7A) for diagnostic requests.
+
+        ATSH needs the full 3-byte header (format=0x81, target=0x7A, source=0xF1);
+        a bare "ATSH7A" is invalid ELM327 syntax (replies "?") and silently leaves
+        the header unset, so every request then goes to the wrong/default address
+        and comes back as a KWP negative response (7F ...). No explicit
+        StartDiagnosticSession is needed — the EDC16_C3_VCD-X70 definition doesn't
+        send one either; the fast-init handshake alone is enough.
+        """
+        log.info("Setting KWP2000 header for target 0x7A...")
+        r = self._send_raw("ATSH817AF1")
+        log.debug(f"ATSH817AF1 -> {r!r}")
 
     def send_kwp(self, payload_hex: str):
         """Send a KWP2000 payload and return response bytes (no header/checksum)."""
@@ -245,28 +226,72 @@ class DiagSession:
         self.logger = logger
         self.ignition = "unknown"  # "on" | "off" | "unknown"
         self._consecutive_empty = 0
+        self.dtcs: list = []
+        self.dtc_events: list = []
+        self._dtc_poll_counter = 0
+
+    def _poll_dtcs(self):
+        """Read active DTCs (KWP2000 SID 0x17, group 0xFF00 = all groups)."""
+        resp = self.elm.send_kwp("17FF00")
+        if resp is None or len(resp) < 2:
+            return
+        ndtc = resp[1]
+        new_dtcs = []
+        idx = 2
+        for _ in range(ndtc):
+            if idx + 3 > len(resp):
+                break
+            hi, lo, status = resp[idx], resp[idx + 1], resp[idx + 2]
+            new_dtcs.append({
+                "code": f"{hi:02X}{lo:02X}",
+                "current": bool(status & 0x04),
+                "historical": bool(status & 0x02),
+            })
+            idx += 3
+        old_codes = {d["code"] for d in self.dtcs}
+        new_codes = {d["code"] for d in new_dtcs}
+        now = datetime.now().isoformat(timespec="seconds")
+        for code in sorted(new_codes - old_codes):
+            log.warning(f"DTC appeared: {code}")
+            self.dtc_events.append({"ts": now, "code": code, "event": "appeared"})
+        for code in sorted(old_codes - new_codes):
+            log.info(f"DTC no longer active: {code}")
+            self.dtc_events.append({"ts": now, "code": code, "event": "cleared"})
+        self.dtc_events = self.dtc_events[-200:]
+        self.dtcs = new_dtcs
+
+    def clear_dtcs(self) -> bool:
+        """Clear all diagnostic information (KWP2000 SID 0x14, group 0xFF00)."""
+        resp = self.elm.send_kwp("14FF00")
+        ok = resp is not None and len(resp) >= 1 and resp[0] == 0x54
+        log.info(f"Clear DTCs -> {'OK' if ok else 'failed'} ({resp.hex().upper() if resp else 'no response'})")
+        if ok:
+            now = datetime.now().isoformat(timespec="seconds")
+            for d in self.dtcs:
+                self.dtc_events.append({"ts": now, "code": d["code"], "event": "cleared_by_user"})
+            self.dtc_events = self.dtc_events[-200:]
+            self.dtcs = []
+        return ok
 
     def _poll_trame(self, name: str, trame: dict) -> bool:
         cmd_hex = trame["cmd"].hex().upper()
         resp = self.elm.send_kwp(cmd_hex)
-        if resp is None or len(resp) < trame["min_bytes"]:
-            log.warning(f"Trame {name}: short/no response ({len(resp) if resp else 0} bytes)")
+        if resp is None:
+            log.warning(f"Trame {name}: no response")
             return False
-        for param, (fb, nb, signed, step, unit) in trame["params"].items():
+        # Always capture the raw hex, even a negative response (7F ...) or a
+        # too-short frame, so nothing polled is ever silently discarded.
+        self.data[f"{name}_raw"] = {"value": resp.hex().upper(), "unit": "hex"}
+        if len(resp) < trame["min_bytes"]:
+            log.warning(f"Trame {name}: short response ({len(resp)} bytes): {resp.hex().upper()}")
+            return False
+        for param, (fb, nb, signed, scale, offset, unit) in trame["params"].items():
             try:
-                val = decode_value(resp, fb, nb, signed, step)
-                # Convert rail pressure hPa -> bar for readability
-                if unit == "hPa" and "pressure" in param.lower():
+                val = decode_value(resp, fb, nb, signed, scale, offset)
+                # hPa -> bar is far more readable for every pressure signal
+                if unit == "hPa":
                     val = val / 1000.0
                     unit = "bar"
-                # Convert LP fuel pressure
-                if param == "Fuel pressure (LP)":
-                    val = val / 1000.0
-                    unit = "bar"
-                # Rail sensor voltage: mV -> V
-                if unit == "mV" and "voltage" in param.lower():
-                    val = val / 1000.0
-                    unit = "V"
                 self.data[param] = {"value": round(val, 3), "unit": unit}
             except Exception as e:
                 log.debug(f"Decode error {param}: {e}")
@@ -278,6 +303,14 @@ class DiagSession:
             if self._poll_trame(name, trame):
                 any_success = True
         self.last_update = time.time()
+        if any_success:
+            self._dtc_poll_counter += 1
+            if self._dtc_poll_counter >= 5:  # ~every 5th cycle, so pressure polling stays responsive
+                self._dtc_poll_counter = 0
+                try:
+                    self._poll_dtcs()
+                except Exception as e:
+                    log.debug(f"DTC poll error: {e}")
         self._mark_cycle(any_success)
 
     def _mark_cycle(self, any_success: bool):
@@ -288,6 +321,7 @@ class DiagSession:
                 if self.logger:
                     self.logger.start_trip()
             if self.logger and self.logger.active:
+                self.data["Active DTCs"] = {"value": ";".join(d["code"] for d in self.dtcs), "unit": ""}
                 self.logger.log_row(self.data)
         else:
             self._consecutive_empty += 1
@@ -335,6 +369,13 @@ class Handler(BaseHTTPRequestHandler):
             self.send_response(404)
             self.end_headers()
 
+    def do_POST(self):
+        if self.path == "/dtc/clear":
+            self._clear_dtcs()
+        else:
+            self.send_response(404)
+            self.end_headers()
+
     def _serve_data(self):
         payload = {
             "ts": time.time(),
@@ -342,6 +383,8 @@ class Handler(BaseHTTPRequestHandler):
             "ignition": session.ignition if session else "unknown",
             "logging": bool(session.logger and session.logger.active) if session else False,
             "log_file": str(session.logger.path) if session and session.logger and session.logger.active else None,
+            "dtcs": session.dtcs if session else [],
+            "dtc_events": session.dtc_events[-20:] if session else [],
         }
         body = json.dumps(payload).encode()
         self.send_response(200)
@@ -356,6 +399,21 @@ class Handler(BaseHTTPRequestHandler):
         self.send_response(200)
         self.send_header("Content-Type", "application/json")
         self.send_header("Access-Control-Allow-Origin", "*")
+        self.end_headers()
+        self.wfile.write(body)
+
+    def _clear_dtcs(self):
+        ok = False
+        if session is not None:
+            try:
+                ok = session.clear_dtcs()
+            except Exception as e:
+                log.error(f"Clear DTCs failed: {e}")
+        body = json.dumps({"ok": ok}).encode()
+        self.send_response(200)
+        self.send_header("Content-Type", "application/json")
+        self.send_header("Access-Control-Allow-Origin", "*")
+        self.send_header("Content-Length", str(len(body)))
         self.end_headers()
         self.wfile.write(body)
 
@@ -414,6 +472,15 @@ class _MockSession:
         self.logger = logger
         self.ignition = "on"
         self._t = 0.0
+        self.dtcs: list = []
+        self.dtc_events: list = []
+
+    def clear_dtcs(self) -> bool:
+        now = datetime.now().isoformat(timespec="seconds")
+        for d in self.dtcs:
+            self.dtc_events.append({"ts": now, "code": d["code"], "event": "cleared_by_user"})
+        self.dtcs = []
+        return True
 
     def start(self):
         self.running = True
@@ -456,32 +523,43 @@ class _MockSession:
             duty = min(99.9, 50 + (setpoint - actual) * 0.1)
             qty = 5 + 30 * abs(math.sin(self._t / 8))
 
+            # Simulate a rail-pressure DTC setting when duty saturates hard, so
+            # the DTC panel/marker have something to show without hardware.
+            saturated = duty > 90 and (setpoint - actual) > 50
+            sim_codes = {d["code"] for d in self.dtcs}
+            if saturated and "0087" not in sim_codes:
+                self.dtcs.append({"code": "0087", "current": True, "historical": False})
+                self.dtc_events.append({"ts": datetime.now().isoformat(timespec="seconds"), "code": "0087", "event": "appeared"})
+            elif not saturated and "0087" in sim_codes:
+                self.dtcs = [d for d in self.dtcs if d["code"] != "0087"]
+                self.dtc_events.append({"ts": datetime.now().isoformat(timespec="seconds"), "code": "0087", "event": "cleared"})
+
             self.data = {
-                "RPM":                      {"value": round(rpm), "unit": "rpm"},
-                "Vehicle speed":            {"value": round(rpm * 0.04, 1), "unit": "km/h"},
-                "Rail pressure actual":     {"value": round(actual / 10, 1), "unit": "bar"},
-                "Rail pressure setpoint":   {"value": round(setpoint / 10, 1), "unit": "bar"},
-                "MPROP duty cycle":         {"value": round(duty, 1), "unit": "%"},
-                "MPROP current actual":     {"value": round(duty * 8), "unit": "mA"},
-                "MPROP current setpoint":   {"value": round(setpoint * 0.5), "unit": "mA"},
-                "Demanded qty":             {"value": round(qty, 1), "unit": "mg/cyc"},
-                "Actual qty":               {"value": round(qty * 0.95, 1), "unit": "mg/cyc"},
-                "Max qty limit":            {"value": 100.0, "unit": "mg/cyc"},
-                "Cyl1 qty":                 {"value": round(qty * 0.24, 2), "unit": "mg/cyc"},
-                "Cyl2 qty":                 {"value": round(qty * 0.25, 2), "unit": "mg/cyc"},
-                "Cyl3 qty":                 {"value": round(qty * 0.26, 2), "unit": "mg/cyc"},
-                "Cyl4 qty":                 {"value": round(qty * 0.25, 2), "unit": "mg/cyc"},
-                "Engine torque actual":     {"value": round(qty * 5.2, 1), "unit": "Nm"},
-                "Torque internal":          {"value": round(qty * 5.5, 1), "unit": "Nm"},
-                "Water temp":               {"value": 87.0, "unit": "°C"},
-                "Fuel temp":                {"value": 42.0, "unit": "°C"},
-                "Batt voltage":             {"value": 14.2, "unit": "V"},
-                "Fuel pressure (LP)":       {"value": round(4.2 + 0.3 * math.sin(self._t), 2), "unit": "bar"},
-                "Rail sensor voltage":      {"value": round(1.17 + actual / 50000, 3), "unit": "V"},
-                "Accel pedal %":            {"value": round(50 * abs(math.sin(self._t / 8)), 1), "unit": "%"},
+                "Régime moteur":                                       {"value": round(rpm), "unit": "tr/min"},
+                "Vitesse véhicule":                                    {"value": round(rpm * 0.04, 1), "unit": "km / h"},
+                "Pression rail actuelle":                              {"value": round(actual / 10, 1), "unit": "bar"},
+                "Consigne de pression rail":                           {"value": round(setpoint / 10, 1), "unit": "bar"},
+                "RCO MPROP":                                           {"value": round(duty, 1), "unit": "%"},
+                "Courant de la MPROP mesuré":                          {"value": round(duty * 8), "unit": "mA"},
+                "Consigne de courant de la MPROP":                     {"value": round(setpoint * 0.5), "unit": "mA"},
+                "Débit désiré avant limitation système et sans LiGov": {"value": round(qty, 1), "unit": "mg/cyc"},
+                "Débit injecté":                                       {"value": round(qty * 0.95, 1), "unit": "mg/cyc"},
+                "Débit maximal":                                       {"value": 100.0, "unit": "mg/cyc"},
+                "Débit poste à poste 1":                               {"value": round(qty * 0.24, 2), "unit": "mg/hub"},
+                "Débit poste à poste 2":                               {"value": round(qty * 0.25, 2), "unit": "mg/hub"},
+                "Débit poste à poste 3":                               {"value": round(qty * 0.26, 2), "unit": "mg/hub"},
+                "Débit poste à poste 4":                               {"value": round(qty * 0.25, 2), "unit": "mg/hub"},
+                "Couple Moteur effectif":                              {"value": round(qty * 5.2, 1), "unit": "Nm"},
+                "Température eau":                                     {"value": 87.0, "unit": "°C"},
+                "Température carburant":                               {"value": 42.0, "unit": "°C"},
+                "Tension batterie":                                    {"value": 14.2, "unit": "V"},
+                "Pression carburant":                                  {"value": round(4.2 + 0.3 * math.sin(self._t), 2), "unit": "bar"},
+                "Tension capteur pression rail":                       {"value": round(1.17 + actual / 50000, 3), "unit": "V"},
+                "Ratio pédale accélérateur":                           {"value": round(50 * abs(math.sin(self._t / 8)), 1), "unit": "%"},
             }
             self.last_update = time.time()
             if self.logger:
+                self.data["Active DTCs"] = {"value": ";".join(d["code"] for d in self.dtcs), "unit": ""}
                 self.logger.log_row(self.data)
             time.sleep(0.3)
 
