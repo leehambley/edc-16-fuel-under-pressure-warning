@@ -85,7 +85,11 @@
   }
   #status-dot.ok { background: var(--green); box-shadow: 0 0 6px var(--green); }
   #status-dot.warn { background: var(--amber); box-shadow: 0 0 6px var(--amber); }
-  #status-dot.err { background: var(--red); }
+  #status-dot.err { background: var(--red); animation: pulse-retry 1.2s ease-in-out infinite; }
+  @keyframes pulse-retry {
+    0%, 100% { opacity: 1; }
+    50% { opacity: 0.35; }
+  }
   #status-label { color: var(--text2); font-size: 11px; }
   #server-url {
     margin-left: auto;
@@ -353,8 +357,8 @@
       <option value="__live__">● Live</option>
     </select>
     <button id="theme-toggle" onclick="toggleTheme()">☀ light</button>
-    <input id="srv" value="http://localhost:8765" />
-    <button onclick="reconnect()">Connect</button>
+    <input id="srv" value="http://localhost:8765" onkeydown="if(event.key==='Enter') reconnect()" onblur="reconnect()" />
+    <button onclick="reconnect()" title="Rarely needed — it auto-connects and keeps retrying on its own">Connect</button>
   </div>
 </div>
 
@@ -533,7 +537,7 @@
         MPROP duty cycle &amp; RPM
         <div class="legend">
           <div class="legend-item"><div class="legend-swatch" style="background:var(--amber)"></div>MPROP duty %</div>
-          <div class="legend-item"><div class="legend-swatch" style="background:var(--purple)"></div>RPM ÷ 60</div>
+          <div class="legend-item"><div class="legend-swatch" style="background:var(--purple)"></div>RPM (left axis)</div>
         </div>
       </div>
       <div class="scope-screen" style="height:140px">
@@ -549,8 +553,8 @@
       <div class="chart-title">
         Voltages — battery &amp; rail pressure sensor
         <div class="legend">
-          <div class="legend-item"><div class="legend-swatch" style="background:var(--teal)"></div>Battery (V)</div>
-          <div class="legend-item"><div class="legend-swatch" style="background:var(--purple)"></div>Rail sensor (V)</div>
+          <div class="legend-item"><div class="legend-swatch" style="background:var(--teal)"></div>Battery V (right axis)</div>
+          <div class="legend-item"><div class="legend-swatch" style="background:var(--purple)"></div>Rail sensor V (left axis)</div>
         </div>
       </div>
       <div class="scope-screen" style="height:140px">
@@ -587,6 +591,14 @@ const ts = () => new Date().toLocaleTimeString('en-GB', {hour12:false});
 let serverBase = 'http://localhost:8765';
 let polling = null;
 let selectedParam = null;
+let retryCount = 0;
+
+(function restoreServerUrl() {
+  try {
+    const saved = localStorage.getItem('edc16-server-url');
+    if (saved) document.getElementById('srv').value = saved;
+  } catch (e) {}
+})();
 
 const history = {};
 const timeLabels = Array(HISTORY).fill('');
@@ -745,7 +757,18 @@ function toggleTheme() {
   applyTheme(saved);
 })();
 
-function makeChart(id, datasets, yLabel, yMax) {
+function unitTicks(suffix, decimals) {
+  return {
+    count: 8,
+    color: 'var(--text3)',
+    font: { family: 'JetBrains Mono, monospace', size: 10 },
+    callback: v => (decimals !== undefined ? Number(v).toFixed(decimals) : v) + (suffix ? ' ' + suffix : '')
+  };
+}
+
+const commonAxisCosmetics = { grid: { display: false }, border: { display: false } };
+
+function makeChart(id, datasets, yLabel, unitSuffix, decimals, minZero) {
   const cfg = {
     type: 'line',
     data: { labels: timeLabels, datasets },
@@ -756,12 +779,36 @@ function makeChart(id, datasets, yLabel, yMax) {
         x: { display: false },
         y: {
           display: true, position: 'right',
-          max: yMax || undefined,
-          grid: { display: false },
-          border: { display: false },
-          ticks: { count: 9, color: 'var(--text3)', font: { family: 'JetBrains Mono, monospace', size: 10 } },
+          // Autoscales to whatever's visible — no more fixed ranges that
+          // flatten the trace — with a floor at 0 only for quantities that
+          // can't physically go negative (e.g. pressure).
+          ...(minZero ? { suggestedMin: 0 } : {}),
+          ...commonAxisCosmetics,
+          ticks: unitTicks(unitSuffix, decimals),
           title: { display: !!yLabel, text: yLabel, color: 'var(--text3)', font: { size: 10 } }
         }
+      },
+      elements: { point: { radius: 0 }, line: { tension: 0.3, borderWidth: 1.75 } }
+    }
+  };
+  return new Chart(document.getElementById(id), cfg);
+}
+
+function makeDualChart(id, datasets, yCfg, y1Cfg) {
+  const cfg = {
+    type: 'line',
+    data: { labels: timeLabels, datasets },
+    options: {
+      responsive: true, maintainAspectRatio: false, animation: false,
+      plugins: { legend: { display: false }, tooltip: { mode: 'index', intersect: false } },
+      scales: {
+        x: { display: false },
+        y: { display: true, position: 'right', ...commonAxisCosmetics, ...yCfg,
+             ticks: unitTicks(yCfg.unit, yCfg.decimals),
+             title: { display: true, text: yCfg.title, color: 'var(--text3)', font: { size: 10 } } },
+        y1: { display: true, position: 'left', ...commonAxisCosmetics, ...y1Cfg,
+             ticks: unitTicks(y1Cfg.unit, y1Cfg.decimals),
+             title: { display: true, text: y1Cfg.title, color: 'var(--text3)', font: { size: 10 } } },
       },
       elements: { point: { radius: 0 }, line: { tension: 0.3, borderWidth: 1.75 } }
     }
@@ -772,21 +819,35 @@ function makeChart(id, datasets, yLabel, yMax) {
 const chartRail = makeChart('chartRail', [
   { label: 'Rail actual', data: Array(HISTORY).fill(null), borderColor: '#378add', fill: false },
   { label: 'Rail setpoint', data: Array(HISTORY).fill(null), borderColor: '#444', borderDash: [4,3], fill: false },
-], 'bar', 1800);
+], 'bar', 'bar', 0);
 
-const chartMprop = makeChart('chartMprop', [
-  { label: 'MPROP duty', data: Array(HISTORY).fill(null), borderColor: '#ef9f27', fill: false },
-  { label: 'RPM/60', data: Array(HISTORY).fill(null), borderColor: '#7f77dd', fill: false },
-], '%', 110);
+// MPROP duty (%) and RPM live on genuinely different scales, so they get
+// independent y-axes rather than RPM being squashed into a 0-110 range.
+const chartMprop = makeDualChart('chartMprop',
+  [
+    { label: 'MPROP duty', data: Array(HISTORY).fill(null), borderColor: '#ef9f27', fill: false, yAxisID: 'y' },
+    { label: 'RPM', data: Array(HISTORY).fill(null), borderColor: '#7f77dd', fill: false, yAxisID: 'y1' },
+  ],
+  { min: 0, max: 100, unit: '%', decimals: 0, title: 'duty %' },
+  { suggestedMin: 0, unit: 'rpm', decimals: 0, title: 'rpm' }
+);
 
-const chartVolt = makeChart('chartVolt', [
-  { label: 'Battery', data: Array(HISTORY).fill(null), borderColor: '#1d9e75', fill: false },
-  { label: 'Rail sensor', data: Array(HISTORY).fill(null), borderColor: '#7f77dd', fill: false },
-], 'V', null);
+// Same story for battery (~12-15V) vs. the rail sensor (~0-5V) — one shared
+// axis would crush the sensor trace to a flat line near zero.
+const chartVolt = makeDualChart('chartVolt',
+  [
+    { label: 'Battery', data: Array(HISTORY).fill(null), borderColor: '#1d9e75', fill: false, yAxisID: 'y' },
+    { label: 'Rail sensor', data: Array(HISTORY).fill(null), borderColor: '#7f77dd', fill: false, yAxisID: 'y1' },
+  ],
+  { suggestedMin: 10, suggestedMax: 16, unit: 'V', decimals: 1, title: 'batt V' },
+  { suggestedMin: 0, unit: 'V', decimals: 2, title: 'sensor V' }
+);
 
+let selectedUnit = '';
 const chartSelected = makeChart('chartSelected', [
   { label: 'Selected', data: Array(HISTORY).fill(null), borderColor: '#5dca9a', fill: false },
-], '', null);
+], '', '');
+chartSelected.options.scales.y.ticks.callback = v => selectedUnit ? `${v} ${selectedUnit}` : v;
 
 function pushHistory(key, val) {
   if (!history[key]) history[key] = Array(HISTORY).fill(null);
@@ -884,9 +945,8 @@ function redrawCharts() {
   setReadout('ro-rail-actual', lastValue('Pression rail actuelle'), 'bar');
   setReadout('ro-rail-set', lastValue('Consigne de pression rail'), 'bar');
 
-  const rpmDiv = (history['Régime moteur'] || []).map(v => v !== null ? v / 60 : null);
   updateChart(chartMprop, 0, history['RCO MPROP'] || []);
-  updateChart(chartMprop, 1, rpmDiv);
+  updateChart(chartMprop, 1, history['Régime moteur'] || []);
   chartMprop.data.labels = timeLabels.slice();
   chartMprop.update('none');
   setReadout('ro-mprop', lastValue('RCO MPROP'), '%');
@@ -970,6 +1030,7 @@ function processData(resp) {
   redrawCharts();
 
   checkWarnings(data);
+  retryCount = 0;
   setStatus('ok', 'live — ' + now);
 }
 
@@ -978,12 +1039,22 @@ function poll() {
   fetch(serverBase + '/data')
     .then(r => r.json())
     .then(processData)
-    .catch(() => { if (!historicalMode) setStatus('err', 'no connection'); });
+    .catch(() => {
+      if (historicalMode) return;
+      retryCount++;
+      setStatus('err', `reconnecting… (attempt ${retryCount})`);
+    });
 }
 
+// Auto-connects on load and keeps retrying forever in the background — the
+// user should never have to think about connection state. The Connect
+// button and the Enter/blur handlers on the URL field only matter if they
+// change the server address; the interval below never stops on its own.
 function reconnect() {
   serverBase = document.getElementById('srv').value.replace(/\/+$/, '');
+  try { localStorage.setItem('edc16-server-url', serverBase); } catch (e) {}
   if (polling) clearInterval(polling);
+  retryCount = 0;
   setStatus('warn', 'connecting…');
   poll();
   polling = setInterval(poll, 400);
@@ -994,11 +1065,12 @@ function toggleChart(row) {
   document.querySelectorAll('.param-row').forEach(r => r.classList.remove('active'));
   row.classList.add('active');
   selectedParam = row.dataset.key;
-  document.getElementById('selected-name').textContent = selectedParam;
+  selectedUnit = document.getElementById('u-' + selectedParam)?.textContent.trim() || '';
+  document.getElementById('selected-name').textContent = selectedParam + (selectedUnit ? ' (' + selectedUnit + ')' : '');
   chartSelected.data.datasets[0].data = (history[selectedParam] || Array(viewLength).fill(null)).slice();
   chartSelected.data.labels = timeLabels.slice();
   chartSelected.update('none');
-  setReadout('ro-selected', lastValue(selectedParam), '', 2);
+  setReadout('ro-selected', lastValue(selectedParam), selectedUnit, 2);
 }
 
 // ─── Session browser: live tailing vs. reviewing a past trip's CSV ─────────
@@ -1132,6 +1204,7 @@ function loadTrip(filename) {
 }
 
 reconnect();
+setInterval(() => { if (!historicalMode) loadTripList(); }, 15000);
 </script>
 </body>
 </html>
