@@ -819,7 +819,7 @@ function makeDualChart(id, datasets, yCfg, y1Cfg) {
 const chartRail = makeChart('chartRail', [
   { label: 'Rail actual', data: Array(HISTORY).fill(null), borderColor: '#378add', fill: false },
   { label: 'Rail setpoint', data: Array(HISTORY).fill(null), borderColor: '#444', borderDash: [4,3], fill: false },
-], 'bar', 'bar', 0);
+], 'bar', 'bar', 0, true);
 
 // MPROP duty (%) and RPM live on genuinely different scales, so they get
 // independent y-axes rather than RPM being squashed into a 0-110 range.
