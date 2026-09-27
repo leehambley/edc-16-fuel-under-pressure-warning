@@ -81,13 +81,17 @@ def decode_value(data: bytes, first_byte_1idx: int, n_bits: int, signed: bool, s
     """Decode a value from a KWP2000 response frame.
 
     n_bits is 16 for a normal word, or 31 for a "large" counter (odometer,
-    engine-run-time, ...) that DDT4ALL stores as a full 4-byte big-endian word.
+    engine-run-time, ...) that DDT4ALL stores in a 4-byte big-endian word
+    with the counter in the upper 31 bits (bit 0 is some other flag, not
+    part of the value) — confirmed against the dash odometer, which read
+    exactly half of our first, unshifted decode.
     """
     idx = first_byte_1idx - 1  # convert to 0-indexed
     if n_bits == 16:
         raw = struct.unpack_from(">h" if signed else ">H", data, idx)[0]
     elif n_bits == 31:
         raw = struct.unpack_from(">i" if signed else ">I", data, idx)[0]
+        raw >>= 1
     elif n_bits == 8:
         raw = struct.unpack_from(">b" if signed else ">B", data, idx)[0]
     else:
